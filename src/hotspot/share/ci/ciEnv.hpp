@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,6 +32,7 @@
 #include "code/dependencies.hpp"
 #include "code/exceptionHandlerTable.hpp"
 #include "compiler/oopMap.hpp"
+#include "oops/methodData.hpp"
 #include "runtime/thread.hpp"
 
 class CompileTask;
@@ -81,7 +82,7 @@ private:
   // Distinguished instances of certain ciObjects..
   static ciObject*              _null_object_instance;
 
-#define WK_KLASS_DECL(name, ignore_s, ignore_o) static ciInstanceKlass* _##name;
+#define WK_KLASS_DECL(name, ignore_s) static ciInstanceKlass* _##name;
   WK_KLASSES_DO(WK_KLASS_DECL)
 #undef WK_KLASS_DECL
 
@@ -373,7 +374,7 @@ public:
 
 
   // Access to certain well known ciObjects.
-#define WK_KLASS_FUNC(name, ignore_s, ignore_o) \
+#define WK_KLASS_FUNC(name, ignore_s) \
   ciInstanceKlass* name() { \
     return _##name;\
   }

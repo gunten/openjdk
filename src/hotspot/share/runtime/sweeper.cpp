@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,21 +28,27 @@
 #include "code/icBuffer.hpp"
 #include "code/nmethod.hpp"
 #include "compiler/compileBroker.hpp"
+#include "gc/shared/collectedHeap.hpp"
+#include "gc/shared/workgroup.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "logging/log.hpp"
 #include "logging/logStream.hpp"
+#include "memory/allocation.inline.hpp"
 #include "memory/resourceArea.hpp"
+#include "memory/universe.hpp"
 #include "oops/method.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/compilationPolicy.hpp"
+#include "runtime/interfaceSupport.inline.hpp"
+#include "runtime/handshake.hpp"
 #include "runtime/mutexLocker.hpp"
-#include "runtime/orderAccess.inline.hpp"
+#include "runtime/orderAccess.hpp"
 #include "runtime/os.hpp"
 #include "runtime/sweeper.hpp"
 #include "runtime/thread.inline.hpp"
 #include "runtime/vm_operations.hpp"
-#include "trace/tracing.hpp"
+#include "runtime/vmThread.hpp"
 #include "utilities/events.hpp"
-#include "utilities/ticks.inline.hpp"
 #include "utilities/xmlstream.hpp"
 
 #ifdef ASSERT
@@ -195,6 +201,38 @@ bool NMethodSweeper::wait_for_stack_scanning() {
   return _current.end();
 }
 
+class NMethodMarkingThreadClosure : public ThreadClosure {
+private:
+  CodeBlobClosure* _cl;
+public:
+  NMethodMarkingThreadClosure(CodeBlobClosure* cl) : _cl(cl) {}
+  void do_thread(Thread* thread) {
+    if (thread->is_Java_thread() && ! thread->is_Code_cache_sweeper_thread()) {
+      JavaThread* jt = (JavaThread*) thread;
+      jt->nmethods_do(_cl);
+    }
+  }
+};
+
+class NMethodMarkingTask : public AbstractGangTask {
+private:
+  NMethodMarkingThreadClosure* _cl;
+public:
+  NMethodMarkingTask(NMethodMarkingThreadClosure* cl) :
+    AbstractGangTask("Parallel NMethod Marking"),
+    _cl(cl) {
+    Threads::change_thread_claim_parity();
+  }
+
+  ~NMethodMarkingTask() {
+    Threads::assert_all_threads_claimed();
+  }
+
+  void work(uint worker_id) {
+    Threads::possibly_parallel_threads_do(true, _cl);
+  }
+};
+
 /**
   * Scans the stacks of all Java threads and marks activations of not-entrant methods.
   * No need to synchronize access, since 'mark_active_nmethods' is always executed at a
@@ -203,12 +241,56 @@ bool NMethodSweeper::wait_for_stack_scanning() {
 void NMethodSweeper::mark_active_nmethods() {
   CodeBlobClosure* cl = prepare_mark_active_nmethods();
   if (cl != NULL) {
-    Threads::nmethods_do(cl);
+    WorkGang* workers = Universe::heap()->get_safepoint_workers();
+    if (workers != NULL) {
+      NMethodMarkingThreadClosure tcl(cl);
+      NMethodMarkingTask task(&tcl);
+      workers->run_task(&task);
+    } else {
+      Threads::nmethods_do(cl);
+    }
   }
 }
 
 CodeBlobClosure* NMethodSweeper::prepare_mark_active_nmethods() {
+#ifdef ASSERT
+  if (ThreadLocalHandshakes) {
+    assert(Thread::current()->is_Code_cache_sweeper_thread(), "must be executed under CodeCache_lock and in sweeper thread");
+    assert_lock_strong(CodeCache_lock);
+  } else {
+    assert(SafepointSynchronize::is_at_safepoint(), "must be executed at a safepoint");
+  }
+#endif
+
+  // If we do not want to reclaim not-entrant or zombie methods there is no need
+  // to scan stacks
+  if (!MethodFlushing) {
+    return NULL;
+  }
+
+  // Increase time so that we can estimate when to invoke the sweeper again.
+  _time_counter++;
+
+  // Check for restart
+  assert(_current.method() == NULL, "should only happen between sweeper cycles");
+  assert(wait_for_stack_scanning(), "should only happen between sweeper cycles");
+
+  _seen = 0;
+  _current = CompiledMethodIterator();
+  // Initialize to first nmethod
+  _current.next();
+  _traversals += 1;
+  _total_time_this_sweep = Tickspan();
+
+  if (PrintMethodFlushing) {
+    tty->print_cr("### Sweep: stack traversal %ld", _traversals);
+  }
+  return &mark_activation_closure;
+}
+
+CodeBlobClosure* NMethodSweeper::prepare_reset_hotness_counters() {
   assert(SafepointSynchronize::is_at_safepoint(), "must be executed at a safepoint");
+
   // If we do not want to reclaim not-entrant or zombie methods there is no need
   // to scan stacks
   if (!MethodFlushing) {
@@ -229,24 +311,7 @@ CodeBlobClosure* NMethodSweeper::prepare_mark_active_nmethods() {
     }
   }
 
-  if (wait_for_stack_scanning()) {
-    _seen = 0;
-    _current = CompiledMethodIterator();
-    // Initialize to first nmethod
-    _current.next();
-    _traversals += 1;
-    _total_time_this_sweep = Tickspan();
-
-    if (PrintMethodFlushing) {
-      tty->print_cr("### Sweep: stack traversal %ld", _traversals);
-    }
-    return &mark_activation_closure;
-
-  } else {
-    // Only set hotness counter
-    return &set_hotness_closure;
-  }
-
+  return &set_hotness_closure;
 }
 
 /**
@@ -256,9 +321,20 @@ CodeBlobClosure* NMethodSweeper::prepare_mark_active_nmethods() {
 void NMethodSweeper::do_stack_scanning() {
   assert(!CodeCache_lock->owned_by_self(), "just checking");
   if (wait_for_stack_scanning()) {
-    VM_MarkActiveNMethods op;
-    VMThread::execute(&op);
-    _should_sweep = true;
+    if (ThreadLocalHandshakes) {
+      CodeBlobClosure* code_cl;
+      {
+        MutexLockerEx ccl(CodeCache_lock, Mutex::_no_safepoint_check_flag);
+        code_cl = prepare_mark_active_nmethods();
+      }
+      if (code_cl != NULL) {
+        NMethodMarkingThreadClosure tcl(code_cl);
+        Handshake::execute(&tcl);
+      }
+    } else {
+      VM_MarkActiveNMethods op;
+      VMThread::execute(&op);
+    }
   }
 }
 
@@ -375,7 +451,7 @@ void NMethodSweeper::possibly_sweep() {
   // allocations go to the non-profiled heap and we must be make sure that there is
   // enough space.
   double free_percent = 1 / CodeCache::reverse_free_ratio(CodeBlobType::MethodNonProfiled) * 100;
-  if (free_percent <= StartAggressiveSweepingAt) {
+  if (free_percent <= StartAggressiveSweepingAt || forced || _should_sweep) {
     do_stack_scanning();
   }
 
@@ -405,6 +481,24 @@ void NMethodSweeper::possibly_sweep() {
     _force_sweep = false;
     CodeCache_lock->notify();
   }
+}
+
+static void post_sweep_event(EventSweepCodeCache* event,
+                             const Ticks& start,
+                             const Ticks& end,
+                             s4 traversals,
+                             int swept,
+                             int flushed,
+                             int zombified) {
+  assert(event != NULL, "invariant");
+  assert(event->should_commit(), "invariant");
+  event->set_starttime(start);
+  event->set_endtime(end);
+  event->set_sweepId(traversals);
+  event->set_sweptCount(swept);
+  event->set_flushedCount(flushed);
+  event->set_zombifiedCount(zombified);
+  event->commit();
 }
 
 void NMethodSweeper::sweep_code_cache() {
@@ -493,15 +587,10 @@ void NMethodSweeper::sweep_code_cache() {
     _total_nof_c2_methods_reclaimed += flushed_c2_count;
     _peak_sweep_time = MAX2(_peak_sweep_time, _total_time_this_sweep);
   }
+
   EventSweepCodeCache event(UNTIMED);
   if (event.should_commit()) {
-    event.set_starttime(sweep_start_counter);
-    event.set_endtime(sweep_end_counter);
-    event.set_sweepId(_traversals);
-    event.set_sweptCount(swept_count);
-    event.set_flushedCount(flushed_count);
-    event.set_zombifiedCount(zombified_count);
-    event.commit();
+    post_sweep_event(&event, sweep_start_counter, sweep_end_counter, (s4)_traversals, swept_count, flushed_count, zombified_count);
   }
 
 #ifdef ASSERT
@@ -821,12 +910,13 @@ void NMethodSweeper::log_sweep(const char* msg, const char* format, ...) {
   }
 }
 
-void NMethodSweeper::print() {
+void NMethodSweeper::print(outputStream* out) {
   ttyLocker ttyl;
-  tty->print_cr("Code cache sweeper statistics:");
-  tty->print_cr("  Total sweep time:                %1.0lfms", (double)_total_time_sweeping.value()/1000000);
-  tty->print_cr("  Total number of full sweeps:     %ld", _total_nof_code_cache_sweeps);
-  tty->print_cr("  Total number of flushed methods: %ld(%ld C2 methods)", _total_nof_methods_reclaimed,
+  out = (out == NULL) ? tty : out;
+  out->print_cr("Code cache sweeper statistics:");
+  out->print_cr("  Total sweep time:                %1.0lf ms", (double)_total_time_sweeping.value()/1000000);
+  out->print_cr("  Total number of full sweeps:     %ld", _total_nof_code_cache_sweeps);
+  out->print_cr("  Total number of flushed methods: %ld (thereof %ld C2 methods)", _total_nof_methods_reclaimed,
                                                     _total_nof_c2_methods_reclaimed);
-  tty->print_cr("  Total size of flushed methods:   " SIZE_FORMAT "kB", _total_flushed_size/K);
+  out->print_cr("  Total size of flushed methods:   " SIZE_FORMAT " kB", _total_flushed_size/K);
 }

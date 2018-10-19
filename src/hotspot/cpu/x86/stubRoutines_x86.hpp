@@ -33,7 +33,7 @@ static bool returns_to_call_stub(address return_pc) { return return_pc == _call_
 
 enum platform_dependent_constants {
   code_size1 = 20000 LP64_ONLY(+10000),         // simply increase if too small (assembler will crash if too small)
-  code_size2 = 33800 LP64_ONLY(+10000)           // simply increase if too small (assembler will crash if too small)
+  code_size2 = 35300 LP64_ONLY(+10000)          // simply increase if too small (assembler will crash if too small)
 };
 
 class x86 {
@@ -55,7 +55,13 @@ class x86 {
   static address _double_sign_mask;
   static address _double_sign_flip;
 
+  static address _method_entry_barrier;
+
  public:
+
+  static address method_entry_barrier() {
+    return _method_entry_barrier;
+  }
 
   static address get_previous_fp_entry() {
     return _get_previous_fp_entry;
@@ -138,6 +144,14 @@ class x86 {
   static address _k512_W_addr;
   // byte flip mask for sha512
   static address _pshuffle_byte_flip_mask_addr_sha512;
+  // Masks for base64
+  static address _base64_charset;
+  static address _bswap_mask;
+  static address _gather_mask;
+  static address _right_shift_mask;
+  static address _left_shift_mask;
+  static address _and_mask;
+  static address _url_charset;
 #endif
   // byte flip mask for sha256
   static address _pshuffle_byte_flip_mask_addr;
@@ -198,6 +212,13 @@ class x86 {
   static address k256_W_addr()    { return _k256_W_adr; }
   static address k512_W_addr()    { return _k512_W_addr; }
   static address pshuffle_byte_flip_mask_addr_sha512() { return _pshuffle_byte_flip_mask_addr_sha512; }
+  static address base64_charset_addr() { return _base64_charset; }
+  static address base64url_charset_addr() { return _url_charset; }
+  static address base64_bswap_mask_addr() { return _bswap_mask; }
+  static address base64_gather_mask_addr() { return _gather_mask; }
+  static address base64_right_shift_mask_addr() { return _right_shift_mask; }
+  static address base64_left_shift_mask_addr() { return _left_shift_mask; }
+  static address base64_and_mask_addr() { return _and_mask; }
 #endif
   static address pshuffle_byte_flip_mask_addr() { return _pshuffle_byte_flip_mask_addr; }
   static void generate_CRC32C_table(bool is_pclmulqdq_supported);

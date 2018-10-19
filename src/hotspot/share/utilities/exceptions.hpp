@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -108,6 +108,9 @@ class Exceptions {
   static volatile int _out_of_memory_error_java_heap_errors;
   static volatile int _out_of_memory_error_metaspace_errors;
   static volatile int _out_of_memory_error_class_metaspace_errors;
+
+  // Count linkage errors
+  static volatile int _linkage_errors;
  public:
   // this enum is defined to indicate whether it is safe to
   // ignore the encoding scheme of the original message string.
@@ -208,7 +211,7 @@ class Exceptions {
 //
 // CAUTION: make sure that the function call using a CHECK macro is not the only statement of a
 // conditional branch w/o enclosing {} braces, since the CHECK macros expand into several state-
-// ments!
+// ments! Also make sure it is not used on a function call that is part of a return statement!
 
 #define PENDING_EXCEPTION                        (((ThreadShadow*)THREAD)->pending_exception())
 #define HAS_PENDING_EXCEPTION                    (((ThreadShadow*)THREAD)->has_pending_exception())

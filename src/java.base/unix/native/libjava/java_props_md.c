@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -297,7 +297,23 @@ static int ParseLocale(JNIEnv* env, int cat, char ** std_language, char ** std_s
         if (strcmp(p, "EUC-JP") == 0) {
             *std_encoding = "EUC-JP-LINUX";
         }
-#else
+#endif
+
+#ifdef _AIX
+        if (strcmp(p, "big5") == 0) {
+            /* On AIX Traditional Chinese Big5 codeset is mapped to IBM-950 */
+            *std_encoding = "IBM-950";
+        } else if (strcmp(p, "IBM-943") == 0) {
+            /*
+             * On AIX, IBM-943 is mapped to IBM-943C in which symbol 'yen' and
+             * 'overline' are replaced with 'backslash' and 'tilde' from ASCII
+             * making first 96 code points same as ASCII.
+             */
+            *std_encoding = "IBM-943C";
+        }
+#endif
+
+#ifdef __solaris__
         if (strcmp(p,"eucJP") == 0) {
             /* For Solaris use customized vendor defined character
              * customized EUC-JP converter
@@ -332,8 +348,14 @@ static int ParseLocale(JNIEnv* env, int cat, char ** std_language, char ** std_s
          * file to correctly read UTF-8 files using the default encoding (see
          * 8011194).
          */
-        if (strcmp(p,"US-ASCII") == 0 && getenv("LANG") == NULL &&
-            getenv("LC_ALL") == NULL && getenv("LC_CTYPE") == NULL) {
+        const char* env_lang = getenv("LANG");
+        const char* env_lc_all = getenv("LC_ALL");
+        const char* env_lc_ctype = getenv("LC_CTYPE");
+
+        if (strcmp(p,"US-ASCII") == 0 &&
+            (env_lang == NULL || strlen(env_lang) == 0) &&
+            (env_lc_all == NULL || strlen(env_lc_all) == 0) &&
+            (env_lc_ctype == NULL || strlen(env_lc_ctype) == 0)) {
             *std_encoding = "UTF-8";
         }
 #endif

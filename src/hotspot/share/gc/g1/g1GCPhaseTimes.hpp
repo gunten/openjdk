@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,11 +26,14 @@
 #define SHARE_VM_GC_G1_G1GCPHASETIMES_HPP
 
 #include "gc/shared/referenceProcessorPhaseTimes.hpp"
+#include "gc/shared/weakProcessorPhaseTimes.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "logging/logLevel.hpp"
 #include "memory/allocation.hpp"
 #include "utilities/macros.hpp"
 
 class LineBuffer;
+class G1ParScanThreadState;
 class STWGCTimer;
 
 template <class T> class WorkerDataArray;
@@ -72,7 +75,6 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
     StringDedupQueueFixup,
     StringDedupTableFixup,
     RedirtyCards,
-    PreserveCMReferents,
     YoungFreeCSet,
     NonYoungFreeCSet,
     GCParPhasesSentinel
@@ -127,7 +129,6 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
   double _cur_clear_ct_time_ms;
   double _cur_expand_heap_time_ms;
   double _cur_ref_proc_time_ms;
-  double _cur_ref_enq_time_ms;
 
   double _cur_collection_start_sec;
   double _root_region_scan_wait_time_ms;
@@ -161,6 +162,7 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
   double _cur_verify_after_time_ms;
 
   ReferenceProcessorPhaseTimes _ref_phase_times;
+  WeakProcessorPhaseTimes _weak_phase_times;
 
   double worker_time(GCParPhases phase, uint worker);
   void note_gc_end();
@@ -189,12 +191,15 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
   G1GCPhaseTimes(STWGCTimer* gc_timer, uint max_gc_threads);
   void note_gc_start();
   void print();
+  static const char* phase_name(GCParPhases phase);
 
   // record the time a phase took in seconds
   void record_time_secs(GCParPhases phase, uint worker_i, double secs);
 
   // add a number of seconds to a phase
   void add_time_secs(GCParPhases phase, uint worker_i, double secs);
+
+  void record_or_add_objcopy_time_secs(uint worker_i, double secs);
 
   void record_thread_work_item(GCParPhases phase, uint worker_i, size_t count, uint index = 0);
 
@@ -251,10 +256,6 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
 
   void record_ref_proc_time(double ms) {
     _cur_ref_proc_time_ms = ms;
-  }
-
-  void record_ref_enq_time(double ms) {
-    _cur_ref_enq_time_ms = ms;
   }
 
   void record_root_region_scan_wait_time(double time_ms) {
@@ -361,16 +362,45 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
   }
 
   ReferenceProcessorPhaseTimes* ref_phase_times() { return &_ref_phase_times; }
+
+  WeakProcessorPhaseTimes* weak_phase_times() { return &_weak_phase_times; }
 };
 
-class G1GCParPhaseTimesTracker : public StackObj {
-  double _start_time;
+class G1EvacPhaseWithTrimTimeTracker : public StackObj {
+  G1ParScanThreadState* _pss;
+  Ticks _start;
+
+  Tickspan& _total_time;
+  Tickspan& _trim_time;
+
+  bool _stopped;
+public:
+  G1EvacPhaseWithTrimTimeTracker(G1ParScanThreadState* pss, Tickspan& total_time, Tickspan& trim_time);
+  ~G1EvacPhaseWithTrimTimeTracker();
+
+  void stop();
+};
+
+class G1GCParPhaseTimesTracker : public CHeapObj<mtGC> {
+protected:
+  Ticks _start_time;
   G1GCPhaseTimes::GCParPhases _phase;
   G1GCPhaseTimes* _phase_times;
   uint _worker_id;
+  EventGCPhaseParallel _event;
 public:
   G1GCParPhaseTimesTracker(G1GCPhaseTimes* phase_times, G1GCPhaseTimes::GCParPhases phase, uint worker_id);
-  ~G1GCParPhaseTimesTracker();
+  virtual ~G1GCParPhaseTimesTracker();
+};
+
+class G1EvacPhaseTimesTracker : public G1GCParPhaseTimesTracker {
+  Tickspan _total_time;
+  Tickspan _trim_time;
+
+  G1EvacPhaseWithTrimTimeTracker _trim_tracker;
+public:
+  G1EvacPhaseTimesTracker(G1GCPhaseTimes* phase_times, G1ParScanThreadState* pss, G1GCPhaseTimes::GCParPhases phase, uint worker_id);
+  virtual ~G1EvacPhaseTimesTracker();
 };
 
 #endif // SHARE_VM_GC_G1_G1GCPHASETIMES_HPP

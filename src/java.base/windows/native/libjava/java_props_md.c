@@ -170,6 +170,10 @@ getJavaIDFromLangID(LANGID langID)
         return NULL;
     }
 
+    for (index = 0; index < 5; index++) {
+        elems[index] = NULL;
+    }
+
     if (SetupI18nProps(MAKELCID(langID, SORT_DEFAULT),
                    &(elems[0]), &(elems[1]), &(elems[2]), &(elems[3]), &(elems[4]))) {
 
@@ -183,13 +187,15 @@ getJavaIDFromLangID(LANGID langID)
                 strcat(ret, elems[index]);
             }
         }
-
-        for (index = 0; index < 5; index++) {
-            free(elems[index]);
-        }
     } else {
         free(ret);
         ret = NULL;
+    }
+
+    for (index = 0; index < 5; index++) {
+        if (elems[index] != NULL) {
+            free(elems[index]);
+        }
     }
 
     return ret;
@@ -629,7 +635,6 @@ GetJavaProperties(JNIEnv* env)
      *  user.language
      *  user.script, user.country, user.variant (if user's environment specifies them)
      *  file.encoding
-     *  file.encoding.pkg
      */
     {
         /*

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,13 +24,14 @@
 
 #include "precompiled.hpp"
 #include "ci/ciMethod.hpp"
-#include "ci/ciUtilities.hpp"
+#include "ci/ciUtilities.inline.hpp"
 #include "compiler/abstractCompiler.hpp"
 #include "compiler/compilerDirectives.hpp"
 #include "compiler/compilerOracle.hpp"
+#include "memory/allocation.inline.hpp"
 #include "memory/resourceArea.hpp"
 
-CompilerDirectives::CompilerDirectives() :_match(NULL), _next(NULL), _ref_count(0) {
+CompilerDirectives::CompilerDirectives() : _next(NULL), _match(NULL), _ref_count(0) {
   _c1_store = new DirectiveSet(this);
   _c2_store = new DirectiveSet(this);
 };
@@ -441,7 +442,7 @@ void DirectivesStack::init() {
   char str[] = "*.*";
   const char* error_msg = NULL;
   _default_directives->add_match(str, error_msg);
-#ifdef COMPILER1
+#if defined(COMPILER1) || INCLUDE_JVMCI
   _default_directives->_c1_store->EnableOption = true;
 #endif
 #ifdef COMPILER2

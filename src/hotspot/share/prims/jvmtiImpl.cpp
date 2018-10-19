@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,7 @@
 #include "jvmtifiles/jvmtiEnv.hpp"
 #include "logging/log.hpp"
 #include "logging/logStream.hpp"
+#include "memory/allocation.inline.hpp"
 #include "memory/resourceArea.hpp"
 #include "oops/instanceKlass.hpp"
 #include "oops/oop.inline.hpp"
@@ -38,9 +39,9 @@
 #include "prims/jvmtiRedefineClasses.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/deoptimization.hpp"
-#include "runtime/handles.hpp"
+#include "runtime/frame.inline.hpp"
 #include "runtime/handles.inline.hpp"
-#include "runtime/interfaceSupport.hpp"
+#include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/javaCalls.hpp"
 #include "runtime/os.hpp"
 #include "runtime/serviceThread.hpp"
@@ -530,8 +531,8 @@ VM_GetOrSetLocal::VM_GetOrSetLocal(JavaThread* thread, jint depth, jint index, B
   , _depth(depth)
   , _index(index)
   , _type(type)
-  , _set(false)
   , _jvf(NULL)
+  , _set(false)
   , _result(JVMTI_ERROR_NONE)
 {
 }
@@ -544,8 +545,8 @@ VM_GetOrSetLocal::VM_GetOrSetLocal(JavaThread* thread, jint depth, jint index, B
   , _index(index)
   , _type(type)
   , _value(value)
-  , _set(true)
   , _jvf(NULL)
+  , _set(true)
   , _result(JVMTI_ERROR_NONE)
 {
 }
@@ -557,8 +558,8 @@ VM_GetOrSetLocal::VM_GetOrSetLocal(JavaThread* thread, JavaThread* calling_threa
   , _depth(depth)
   , _index(index)
   , _type(T_OBJECT)
-  , _set(false)
   , _jvf(NULL)
+  , _set(false)
   , _result(JVMTI_ERROR_NONE)
 {
 }
@@ -620,7 +621,7 @@ bool VM_GetOrSetLocal::is_assignable(const char* ty_sign, Klass* klass, Thread* 
     }
   }
   // Compare secondary supers
-  Array<Klass*>* sec_supers = klass->secondary_supers();
+  const Array<Klass*>* sec_supers = klass->secondary_supers();
   for (idx = 0; idx < sec_supers->length(); idx++) {
     if (((Klass*) sec_supers->at(idx))->name() == ty_sym) {
       return true;

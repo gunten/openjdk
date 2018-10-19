@@ -25,14 +25,15 @@
 
 package java.util.jar;
 
-import java.io.FilterInputStream;
 import java.io.DataOutputStream;
+import java.io.FilterInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.IOException;
-import java.util.Map;
 import java.util.HashMap;
-import java.util.Iterator;
+import java.util.Map;
+
+import sun.security.util.SecurityProperties;
 
 /**
  * The Manifest class is used to maintain Manifest entry names and their
@@ -47,16 +48,25 @@ import java.util.Iterator;
  * @since   1.2
  */
 public class Manifest implements Cloneable {
+
     // manifest main attributes
-    private Attributes attr = new Attributes();
+    private final Attributes attr = new Attributes();
 
     // manifest entries
-    private Map<String, Attributes> entries = new HashMap<>();
+    private final Map<String, Attributes> entries = new HashMap<>();
+
+    // associated JarVerifier, not null when called by JarFile::getManifest.
+    private final JarVerifier jv;
+
+    // name of the corresponding jar archive if available.
+    private final String jarFilename;
 
     /**
      * Constructs a new, empty Manifest.
      */
     public Manifest() {
+        jarFilename = null;
+        jv = null;
     }
 
     /**
@@ -66,7 +76,28 @@ public class Manifest implements Cloneable {
      * @throws IOException if an I/O error has occurred
      */
     public Manifest(InputStream is) throws IOException {
+        this(null, is, null);
+    }
+
+    /**
+     * Constructs a new Manifest from the specified input stream.
+     *
+     * @param is the input stream containing manifest data
+     * @param jarFilename the name of the corresponding jar archive if available
+     * @throws IOException if an I/O error has occured
+     */
+    Manifest(InputStream is, String jarFilename) throws IOException {
+        this(null, is, jarFilename);
+    }
+
+    /**
+     * Constructs a new Manifest from the specified input stream
+     * and associates it with a JarVerifier.
+     */
+    Manifest(JarVerifier jv, InputStream is, String jarFilename) throws IOException {
         read(is);
+        this.jarFilename = jarFilename;
+        this.jv = jv;
     }
 
     /**
@@ -77,6 +108,8 @@ public class Manifest implements Cloneable {
     public Manifest(Manifest man) {
         attr.putAll(man.getMainAttributes());
         entries.putAll(man.getEntries());
+        jarFilename = null;
+        jv = man.jv;
     }
 
     /**
@@ -127,6 +160,27 @@ public class Manifest implements Cloneable {
     }
 
     /**
+     * Returns the Attributes for the specified entry name, if trusted.
+     *
+     * @param name entry name
+     * @return returns the same result as {@link #getAttributes(String)}
+     * @throws SecurityException if the associated jar is signed but this entry
+     *      has been modified after signing (i.e. the section in the manifest
+     *      does not exist in SF files of all signers).
+     */
+    Attributes getTrustedAttributes(String name) {
+        // Note: Before the verification of MANIFEST.MF/.SF/.RSA files is done,
+        // jv.isTrustedManifestEntry() isn't able to detect MANIFEST.MF change.
+        // Users of this method should call SharedSecrets.javaUtilJarAccess()
+        // .ensureInitialization() first.
+        Attributes result = getAttributes(name);
+        if (result != null && jv != null && ! jv.isTrustedManifestEntry(name)) {
+            throw new SecurityException("Untrusted manifest entry: " + name);
+        }
+        return result;
+    }
+
+    /**
      * Clears the main Attributes as well as the entries in this Manifest.
      */
     public void clear() {
@@ -148,7 +202,7 @@ public class Manifest implements Cloneable {
         DataOutputStream dos = new DataOutputStream(out);
         // Write out the main attributes for the manifest
         attr.writeMain(dos);
-        // Now write out the pre-entry attributes
+        // Now write out the per-entry attributes
         for (Map.Entry<String, Attributes> e : entries.entrySet()) {
             StringBuffer buffer = new StringBuffer("Name: ");
             String value = e.getKey();
@@ -179,6 +233,14 @@ public class Manifest implements Cloneable {
         return;
     }
 
+    static String getErrorPosition(String filename, final int lineNumber) {
+        if (filename == null ||
+                !SecurityProperties.INCLUDE_JAR_NAME_IN_EXCEPTIONS) {
+            return "line " + lineNumber;
+        }
+        return "manifest of " + filename + ":" + lineNumber;
+    }
+
     /**
      * Reads the Manifest from the specified InputStream. The entry
      * names and attributes read will be merged in with the current
@@ -193,7 +255,7 @@ public class Manifest implements Cloneable {
         // Line buffer
         byte[] lbuf = new byte[512];
         // Read the main attributes for the manifest
-        attr.read(fis, lbuf);
+        int lineNumber = attr.read(fis, lbuf, jarFilename, 0);
         // Total number of entries, attributes read
         int ecount = 0, acount = 0;
         // Average size of entry attributes
@@ -205,8 +267,12 @@ public class Manifest implements Cloneable {
         byte[] lastline = null;
 
         while ((len = fis.readLine(lbuf)) != -1) {
-            if (lbuf[--len] != '\n') {
-                throw new IOException("manifest line too long");
+            byte c = lbuf[--len];
+            lineNumber++;
+
+            if (c != '\n' && c != '\r') {
+                throw new IOException("manifest line too long ("
+                           + getErrorPosition(jarFilename, lineNumber) + ")");
             }
             if (len > 0 && lbuf[len-1] == '\r') {
                 --len;
@@ -219,7 +285,8 @@ public class Manifest implements Cloneable {
             if (name == null) {
                 name = parseName(lbuf, len);
                 if (name == null) {
-                    throw new IOException("invalid manifest format");
+                    throw new IOException("invalid manifest format"
+                              + getErrorPosition(jarFilename, lineNumber) + ")");
                 }
                 if (fis.peek() == ' ') {
                     // name is wrapped
@@ -245,7 +312,7 @@ public class Manifest implements Cloneable {
                 attr = new Attributes(asize);
                 entries.put(name, attr);
             }
-            attr.read(fis, lbuf);
+            lineNumber = attr.read(fis, lbuf, jarFilename, lineNumber);
             ecount++;
             acount += attr.size();
             //XXX: Fix for when the average is 0. When it is 0,
@@ -381,13 +448,38 @@ public class Manifest implements Cloneable {
                 }
                 int tpos = pos;
                 int maxpos = tpos + n;
-                while (tpos < maxpos && tbuf[tpos++] != '\n') ;
+                byte c = 0;
+                // jar.spec.newline: CRLF | LF | CR (not followed by LF)
+                while (tpos < maxpos && (c = tbuf[tpos++]) != '\n' && c != '\r');
+                if (c == '\r' && tpos < maxpos && tbuf[tpos] == '\n') {
+                    tpos++;
+                }
                 n = tpos - pos;
                 System.arraycopy(tbuf, pos, b, off, n);
                 off += n;
                 total += n;
                 pos = tpos;
-                if (tbuf[tpos-1] == '\n') {
+                c = tbuf[tpos-1];
+                if (c == '\n') {
+                    break;
+                }
+                if (c == '\r') {
+                    if (count == pos) {
+                        // try to see if there is a trailing LF
+                        fill();
+                        if (pos < count && tbuf[pos] == '\n') {
+                            if (total < len) {
+                                b[off++] = '\n';
+                                total++;
+                            } else {
+                                // we should always have big enough lbuf but
+                                // just in case we don't, replace the last CR
+                                // with LF.
+                                b[off - 1] = '\n';
+                            }
+                            pos++;
+                        }
+                    }
                     break;
                 }
             }

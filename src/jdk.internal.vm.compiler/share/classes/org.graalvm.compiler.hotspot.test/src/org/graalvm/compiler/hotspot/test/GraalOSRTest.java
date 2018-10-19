@@ -20,6 +20,8 @@
  * or visit www.oracle.com if you need additional information or have any
  * questions.
  */
+
+
 package org.graalvm.compiler.hotspot.test;
 
 import org.graalvm.compiler.api.directives.GraalDirectives;
@@ -98,5 +100,4 @@ public class GraalOSRTest extends GraalOSRTestBase {
         GraalDirectives.controlFlowAnchor();
         return ret;
     }
-
 }

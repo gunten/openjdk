@@ -31,7 +31,9 @@
  * @modules java.management
  *          jdk.jartool/sun.tools.jar
  * @build HelloString
- * @run main SharedStringsBasic
+ * @run driver SharedStringsBasic
+ * @run main/othervm -XX:+UseStringDeduplication SharedStringsBasic
+ * @run main/othervm -XX:-CompactStrings SharedStringsBasic
  */
 import jdk.test.lib.process.OutputAnalyzer;
 import jdk.test.lib.process.ProcessTools;
@@ -47,26 +49,22 @@ public class SharedStringsBasic {
             TestCommon.getSourceFile("SharedStringsBasic.txt").toString();
 
         ProcessBuilder dumpPb = ProcessTools.createJavaProcessBuilder(true,
-          TestCommon.makeCommandLineForAppCDS(
-            "-XX:+UseAppCDS",
             "-cp", appJar,
             "-XX:SharedArchiveConfigFile=" + sharedArchiveConfigFile,
             "-XX:SharedArchiveFile=./SharedStringsBasic.jsa",
             "-Xshare:dump",
-            "-Xlog:cds,cds+hashtables"));
+            "-Xlog:cds,cds+hashtables");
 
         TestCommon.executeAndLog(dumpPb, "dump")
             .shouldContain("Shared string table stats")
             .shouldHaveExitValue(0);
 
         ProcessBuilder runPb = ProcessTools.createJavaProcessBuilder(true,
-          TestCommon.makeCommandLineForAppCDS(
-            "-XX:+UseAppCDS",
             "-cp", appJar,
             "-XX:SharedArchiveFile=./SharedStringsBasic.jsa",
             "-Xshare:auto",
             "-showversion",
-            "HelloString"));
+            "HelloString");
 
         TestCommon.executeAndLog(runPb, "run").shouldHaveExitValue(0);
     }

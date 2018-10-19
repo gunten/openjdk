@@ -23,19 +23,18 @@
 
 package jdk.test.lib.artifacts;
 
-import java.io.FileNotFoundException;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 
 public class ArtifactResolver {
-    public static Map<String, Path> resolve(Class<?> klass) throws FileNotFoundException {
+    public static Map<String, Path> resolve(Class<?> klass) throws ArtifactResolverException {
         ArtifactManager manager = new DefaultArtifactManager();
         try {
             String managerName = System.getProperty("jdk.test.lib.artifacts.artifactmanager");
             if (managerName != null) {
                 manager = (ArtifactManager) Class.forName(managerName).newInstance();
-            } else {
+            } else if (System.getenv().containsKey(JibArtifactManager.JIB_HOME_ENV_NAME)) {
                 manager = JibArtifactManager.newInstance();
             }
         } catch (Exception e) {

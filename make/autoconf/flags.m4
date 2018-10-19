@@ -116,7 +116,7 @@ AC_DEFUN([FLAGS_SETUP_MACOSX_VERSION],
     # of the OS. It currently has a hard coded value. Setting this also limits
     # exposure to API changes in header files. Bumping this is likely to
     # require code changes to build.
-    MACOSX_VERSION_MIN=10.7.0
+    MACOSX_VERSION_MIN=10.9.0
     MACOSX_VERSION_MIN_NODOTS=${MACOSX_VERSION_MIN//\./}
 
     AC_SUBST(MACOSX_VERSION_MIN)
@@ -233,11 +233,18 @@ AC_DEFUN_ONCE([FLAGS_PRE_TOOLCHAIN],
   # The sysroot flags are needed for configure to be able to run the compilers
   FLAGS_SETUP_SYSROOT_FLAGS
 
+  # For solstudio and xlc, the word size flag is required for correct behavior.
+  # For clang/gcc, the flag is only strictly required for reduced builds, but
+  # set it always where possible (x86, sparc and ppc).
   if test "x$TOOLCHAIN_TYPE" = xxlc; then
     MACHINE_FLAG="-q${OPENJDK_TARGET_CPU_BITS}"
-  elif test "x$TOOLCHAIN_TYPE" != xmicrosoft; then
-    if test "x$OPENJDK_TARGET_CPU" != xaarch64 &&
-        test "x$OPENJDK_TARGET_CPU" != xarm; then
+  elif test "x$TOOLCHAIN_TYPE" = xsolstudio; then
+    MACHINE_FLAG="-m${OPENJDK_TARGET_CPU_BITS}"
+  elif test "x$TOOLCHAIN_TYPE" = xgcc || test "x$TOOLCHAIN_TYPE" = xclang; then
+    if test "x$OPENJDK_TARGET_CPU_ARCH" = xx86 &&
+        test "x$OPENJDK_TARGET_CPU" != xx32 ||
+        test "x$OPENJDK_TARGET_CPU_ARCH" = xsparc ||
+        test "x$OPENJDK_TARGET_CPU_ARCH" = xppc; then
       MACHINE_FLAG="-m${OPENJDK_TARGET_CPU_BITS}"
     fi
   fi
@@ -321,22 +328,22 @@ AC_DEFUN([FLAGS_SETUP_TOOLCHAIN_CONTROL],
 
   if test "x$TOOLCHAIN_TYPE" = xmicrosoft; then
     CC_OUT_OPTION=-Fo
-    EXE_OUT_OPTION=-out:
     LD_OUT_OPTION=-out:
     AR_OUT_OPTION=-out:
   else
     # The option used to specify the target .o,.a or .so file.
     # When compiling, how to specify the to be created object file.
     CC_OUT_OPTION='-o$(SPACE)'
-    # When linking, how to specify the to be created executable.
-    EXE_OUT_OPTION='-o$(SPACE)'
-    # When linking, how to specify the to be created dynamically linkable library.
+    # When linking, how to specify the output
     LD_OUT_OPTION='-o$(SPACE)'
-    # When archiving, how to specify the to be create static archive for object files.
-    AR_OUT_OPTION='rcs$(SPACE)'
+    # When archiving, how to specify the destination static archive.
+    if test "x$OPENJDK_TARGET_OS" = xmacosx; then
+      AR_OUT_OPTION='-r -cs$(SPACE)'
+    else
+      AR_OUT_OPTION='-rcs$(SPACE)'
+    fi
   fi
   AC_SUBST(CC_OUT_OPTION)
-  AC_SUBST(EXE_OUT_OPTION)
   AC_SUBST(LD_OUT_OPTION)
   AC_SUBST(AR_OUT_OPTION)
 
@@ -362,8 +369,10 @@ AC_DEFUN_ONCE([FLAGS_POST_TOOLCHAIN],
   if test "x$BUILD_SYSROOT" != x; then
     FLAGS_SETUP_SYSROOT_FLAGS([BUILD_])
   else
-    BUILD_SYSROOT_CFLAGS="$SYSROOT_CFLAGS"
-    BUILD_SYSROOT_LDFLAGS="$SYSROOT_LDFLAGS"
+    if test "x$COMPILE_TYPE" != "xcross"; then
+      BUILD_SYSROOT_CFLAGS="$SYSROOT_CFLAGS"
+      BUILD_SYSROOT_LDFLAGS="$SYSROOT_LDFLAGS"
+    fi
   fi
   AC_SUBST(BUILD_SYSROOT_CFLAGS)
   AC_SUBST(BUILD_SYSROOT_LDFLAGS)

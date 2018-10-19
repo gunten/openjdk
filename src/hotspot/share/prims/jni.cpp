@@ -38,11 +38,14 @@
 #include "classfile/vmSymbols.hpp"
 #include "gc/shared/gcLocker.inline.hpp"
 #include "interpreter/linkResolver.hpp"
+#include "jfr/jfrEvents.hpp"
+#include "jfr/support/jfrThreadId.hpp"
+#include "logging/log.hpp"
 #include "memory/allocation.hpp"
 #include "memory/allocation.inline.hpp"
 #include "memory/oopFactory.hpp"
 #include "memory/resourceArea.hpp"
-#include "memory/universe.inline.hpp"
+#include "memory/universe.hpp"
 #include "oops/access.inline.hpp"
 #include "oops/arrayOop.inline.hpp"
 #include "oops/instanceKlass.hpp"
@@ -63,23 +66,22 @@
 #include "prims/jvmtiThreadState.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/compilationPolicy.hpp"
-#include "runtime/fieldDescriptor.hpp"
+#include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/handles.inline.hpp"
-#include "runtime/interfaceSupport.hpp"
+#include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/java.hpp"
 #include "runtime/javaCalls.hpp"
 #include "runtime/jfieldIDWorkaround.hpp"
 #include "runtime/jniHandles.inline.hpp"
-#include "runtime/orderAccess.inline.hpp"
+#include "runtime/orderAccess.hpp"
 #include "runtime/reflection.hpp"
+#include "runtime/safepointVerifiers.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/signature.hpp"
 #include "runtime/thread.inline.hpp"
 #include "runtime/vm_operations.hpp"
 #include "services/memTracker.hpp"
 #include "services/runtimeService.hpp"
-#include "trace/traceMacros.hpp"
-#include "trace/tracing.hpp"
 #include "utilities/defaultStream.hpp"
 #include "utilities/dtrace.hpp"
 #include "utilities/events.hpp"
@@ -583,7 +585,7 @@ JNI_QUICK_ENTRY(jboolean, jni_IsAssignableFrom(JNIEnv *env, jclass sub, jclass s
   oop super_mirror = JNIHandles::resolve_non_null(super);
   if (java_lang_Class::is_primitive(sub_mirror) ||
       java_lang_Class::is_primitive(super_mirror)) {
-    jboolean ret = (sub_mirror == super_mirror);
+    jboolean ret = oopDesc::equals(sub_mirror, super_mirror);
 
     HOTSPOT_JNI_ISASSIGNABLEFROM_RETURN(ret);
     return ret;
@@ -823,7 +825,7 @@ JNI_QUICK_ENTRY(jboolean, jni_IsSameObject(JNIEnv *env, jobject r1, jobject r2))
 
   oop a = JNIHandles::resolve(r1);
   oop b = JNIHandles::resolve(r2);
-  jboolean ret = (a == b) ? JNI_TRUE : JNI_FALSE;
+  jboolean ret = oopDesc::equals(a, b) ? JNI_TRUE : JNI_FALSE;
 
   HOTSPOT_JNI_ISSAMEOBJECT_RETURN(ret);
   return ret;
@@ -2464,7 +2466,8 @@ JNI_QUICK_ENTRY(const jchar*, jni_GetStringChars(
     if (buf != NULL) {
       if (s_len > 0) {
         if (!is_latin1) {
-          memcpy(buf, s_value->char_at_addr(0), sizeof(jchar)*s_len);
+          ArrayAccess<>::arraycopy_to_native(s_value, (size_t) typeArrayOopDesc::element_offset<jchar>(0),
+                                             buf, s_len);
         } else {
           for (int i = 0; i < s_len; i++) {
             buf[i] = ((jchar) s_value->byte_at(i)) & 0xff;
@@ -2627,7 +2630,17 @@ JNI_ENTRY(void, jni_SetObjectArrayElement(JNIEnv *env, jobjectArray array, jsize
     if (v == NULL || v->is_a(ObjArrayKlass::cast(a->klass())->element_klass())) {
       a->obj_at_put(index, v);
     } else {
-      THROW(vmSymbols::java_lang_ArrayStoreException());
+      ResourceMark rm(THREAD);
+      stringStream ss;
+      Klass *bottom_kl = ObjArrayKlass::cast(a->klass())->bottom_klass();
+      ss.print("type mismatch: can not store %s to %s[%d]",
+               v->klass()->external_name(),
+               bottom_kl->is_typeArray_klass() ? type2name_tab[ArrayKlass::cast(bottom_kl)->element_type()] : bottom_kl->external_name(),
+               index);
+      for (int dims = ArrayKlass::cast(a->klass())->dimension(); dims > 1; --dims) {
+        ss.print("[]");
+      }
+      THROW_MSG(vmSymbols::java_lang_ArrayStoreException(), ss.as_string());
     }
   } else {
     char buf[jintAsStringSize];
@@ -2674,7 +2687,7 @@ DEFINE_NEWSCALARARRAY(jintArray,     new_intArray,    Int,
 DEFINE_NEWSCALARARRAY(jlongArray,    new_longArray,   Long,
                       HOTSPOT_JNI_NEWLONGARRAY_ENTRY(env, len),
                       HOTSPOT_JNI_NEWLONGARRAY_RETURN(_ret_ref))
-DEFINE_NEWSCALARARRAY(jfloatArray,   new_singleArray, Float,
+DEFINE_NEWSCALARARRAY(jfloatArray,   new_floatArray,  Float,
                       HOTSPOT_JNI_NEWFLOATARRAY_ENTRY(env, len),
                       HOTSPOT_JNI_NEWFLOATARRAY_RETURN(_ret_ref))
 DEFINE_NEWSCALARARRAY(jdoubleArray,  new_doubleArray, Double,
@@ -2720,7 +2733,8 @@ JNI_QUICK_ENTRY(ElementType*, \
     result = NEW_C_HEAP_ARRAY_RETURN_NULL(ElementType, len, mtInternal); \
     if (result != NULL) {                                                \
       /* copy the array to the c chunk */                                \
-      memcpy(result, a->Tag##_at_addr(0), sizeof(ElementType)*len);      \
+      ArrayAccess<>::arraycopy_to_native(a, typeArrayOopDesc::element_offset<ElementType>(0), \
+                                         result, len);                   \
       if (isCopy) {                                                      \
         *isCopy = JNI_TRUE;                                              \
       }                                                                  \
@@ -2769,7 +2783,7 @@ JNI_QUICK_ENTRY(void, \
   int len = a->length(); \
   if (len != 0) {   /* Empty array:  nothing to free or copy. */  \
     if ((mode == 0) || (mode == JNI_COMMIT)) { \
-      memcpy(a->Tag##_at_addr(0), buf, sizeof(ElementType)*len); \
+      ArrayAccess<>::arraycopy_from_native(buf, a, typeArrayOopDesc::element_offset<ElementType>(0), len); \
     } \
     if ((mode == 0) || (mode == JNI_ABORT)) { \
       FreeHeap(buf); \
@@ -2820,10 +2834,7 @@ jni_Get##Result##ArrayRegion(JNIEnv *env, ElementType##Array array, jsize start,
     THROW(vmSymbols::java_lang_ArrayIndexOutOfBoundsException()); \
   } else { \
     if (len > 0) { \
-      int sc = TypeArrayKlass::cast(src->klass())->log2_element_size(); \
-      memcpy((u_char*) buf, \
-             (u_char*) src->Tag##_at_addr(start), \
-             len << sc);                          \
+      ArrayAccess<>::arraycopy_to_native(src, typeArrayOopDesc::element_offset<ElementType>(start), buf, len); \
     } \
   } \
 JNI_END
@@ -2870,10 +2881,7 @@ jni_Set##Result##ArrayRegion(JNIEnv *env, ElementType##Array array, jsize start,
     THROW(vmSymbols::java_lang_ArrayIndexOutOfBoundsException()); \
   } else { \
     if (len > 0) { \
-      int sc = TypeArrayKlass::cast(dst->klass())->log2_element_size(); \
-      memcpy((u_char*) dst->Tag##_at_addr(start), \
-             (u_char*) buf, \
-             len << sc);    \
+      ArrayAccess<>::arraycopy_from_native(buf, dst, typeArrayOopDesc::element_offset<ElementType>(start), len); \
     } \
   } \
 JNI_END
@@ -3109,7 +3117,8 @@ JNI_ENTRY(void, jni_GetStringRegion(JNIEnv *env, jstring string, jsize start, js
       typeArrayOop s_value = java_lang_String::value(s);
       bool is_latin1 = java_lang_String::is_latin1(s);
       if (!is_latin1) {
-        memcpy(buf, s_value->char_at_addr(start), sizeof(jchar)*len);
+        ArrayAccess<>::arraycopy_to_native(s_value, typeArrayOopDesc::element_offset<jchar>(start),
+                                           buf, len);
       } else {
         for (int i = 0; i < len; i++) {
           buf[i] = ((jchar) s_value->byte_at(i + start)) & 0xff;
@@ -3145,15 +3154,32 @@ JNI_ENTRY(void, jni_GetStringUTFRegion(JNIEnv *env, jstring string, jsize start,
   }
 JNI_END
 
+static oop lock_gc_or_pin_object(JavaThread* thread, jobject obj) {
+  if (Universe::heap()->supports_object_pinning()) {
+    const oop o = JNIHandles::resolve_non_null(obj);
+    return Universe::heap()->pin_object(thread, o);
+  } else {
+    GCLocker::lock_critical(thread);
+    return JNIHandles::resolve_non_null(obj);
+  }
+}
+
+static void unlock_gc_or_unpin_object(JavaThread* thread, jobject obj) {
+  if (Universe::heap()->supports_object_pinning()) {
+    const oop o = JNIHandles::resolve_non_null(obj);
+    return Universe::heap()->unpin_object(thread, o);
+  } else {
+    GCLocker::unlock_critical(thread);
+  }
+}
 
 JNI_ENTRY(void*, jni_GetPrimitiveArrayCritical(JNIEnv *env, jarray array, jboolean *isCopy))
   JNIWrapper("GetPrimitiveArrayCritical");
  HOTSPOT_JNI_GETPRIMITIVEARRAYCRITICAL_ENTRY(env, array, (uintptr_t *) isCopy);
-  GCLocker::lock_critical(thread);
   if (isCopy != NULL) {
     *isCopy = JNI_FALSE;
   }
-  oop a = JNIHandles::resolve_non_null(array);
+  oop a = lock_gc_or_pin_object(thread, array);
   assert(a->is_array(), "just checking");
   BasicType type;
   if (a->is_objArray()) {
@@ -3170,8 +3196,7 @@ JNI_END
 JNI_ENTRY(void, jni_ReleasePrimitiveArrayCritical(JNIEnv *env, jarray array, void *carray, jint mode))
   JNIWrapper("ReleasePrimitiveArrayCritical");
   HOTSPOT_JNI_RELEASEPRIMITIVEARRAYCRITICAL_ENTRY(env, array, carray, mode);
-  // The array, carray and mode arguments are ignored
-  GCLocker::unlock_critical(thread);
+  unlock_gc_or_unpin_object(thread, array);
 HOTSPOT_JNI_RELEASEPRIMITIVEARRAYCRITICAL_RETURN();
 JNI_END
 
@@ -3179,8 +3204,7 @@ JNI_END
 JNI_ENTRY(const jchar*, jni_GetStringCritical(JNIEnv *env, jstring string, jboolean *isCopy))
   JNIWrapper("GetStringCritical");
   HOTSPOT_JNI_GETSTRINGCRITICAL_ENTRY(env, string, (uintptr_t *) isCopy);
-  GCLocker::lock_critical(thread);
-  oop s = JNIHandles::resolve_non_null(string);
+  oop s = lock_gc_or_pin_object(thread, string);
   typeArrayOop s_value = java_lang_String::value(s);
   bool is_latin1 = java_lang_String::is_latin1(s);
   if (isCopy != NULL) {
@@ -3217,7 +3241,7 @@ JNI_ENTRY(void, jni_ReleaseStringCritical(JNIEnv *env, jstring str, const jchar 
     // This assumes that ReleaseStringCritical bookends GetStringCritical.
     FREE_C_HEAP_ARRAY(jchar, chars);
   }
-  GCLocker::unlock_critical(thread);
+  unlock_gc_or_unpin_object(thread, str);
 HOTSPOT_JNI_RELEASESTRINGCRITICAL_RETURN();
 JNI_END
 
@@ -3755,13 +3779,7 @@ void copy_jni_function_table(const struct JNINativeInterface_ *new_jni_NativeInt
 void quicken_jni_functions() {
   // Replace Get<Primitive>Field with fast versions
   if (UseFastJNIAccessors && !JvmtiExport::can_post_field_access()
-      && !VerifyJNIFields && !CountJNICalls && !CheckJNICalls
-#if defined(_WINDOWS) && defined(IA32) && defined(COMPILER2)
-      // windows x86 currently needs SEH wrapper and the gain of the fast
-      // versions currently isn't certain for server vm on uniprocessor.
-      && os::is_MP()
-#endif
-  ) {
+      && !VerifyJNIFields && !CountJNICalls && !CheckJNICalls) {
     address func;
     func = JNI_FastGetField::generate_fast_get_boolean_field();
     if (func != (address)-1) {
@@ -3811,6 +3829,14 @@ struct JNINativeInterface_* jni_functions_nocheck() {
   return &jni_NativeInterface;
 }
 
+static void post_thread_start_event(const JavaThread* jt) {
+  assert(jt != NULL, "invariant");
+  EventThreadStart event;
+  if (event.should_commit()) {
+    event.set_thread(JFR_THREAD_ID(jt));
+    event.commit();
+  }
+}
 
 // Invocation API
 
@@ -3886,9 +3912,7 @@ static jint JNI_CreateJavaVM_inner(JavaVM **vm, void **penv, void *args) {
 
   // We use Atomic::xchg rather than Atomic::add/dec since on some platforms
   // the add/dec implementations are dependent on whether we are running
-  // on a multiprocessor, and at this stage of initialization the os::is_MP
-  // function used to determine this will always return false. Atomic::xchg
-  // does not have this problem.
+  // on a multiprocessor Atomic::xchg does not have this problem.
   if (Atomic::xchg(1, &vm_created) == 1) {
     return JNI_EEXIST;   // already created, or create attempt in progress
   }
@@ -3943,11 +3967,7 @@ static jint JNI_CreateJavaVM_inner(JavaVM **vm, void **penv, void *args) {
        JvmtiExport::post_thread_start(thread);
     }
 
-    EventThreadStart event;
-    if (event.should_commit()) {
-      event.set_thread(THREAD_TRACE_ID(thread));
-      event.commit();
-    }
+    post_thread_start_event(thread);
 
 #ifndef PRODUCT
     // Check if we should compile all classes on bootclasspath
@@ -4177,11 +4197,7 @@ static jint attach_current_thread(JavaVM *vm, void **penv, void *_args, bool dae
     JvmtiExport::post_thread_start(thread);
   }
 
-  EventThreadStart event;
-  if (event.should_commit()) {
-    event.set_thread(THREAD_TRACE_ID(thread));
-    event.commit();
-  }
+  post_thread_start_event(thread);
 
   *(JNIEnv**)penv = thread->jni_environment();
 
@@ -4215,25 +4231,26 @@ jint JNICALL jni_AttachCurrentThread(JavaVM *vm, void **penv, void *_args) {
 
 jint JNICALL jni_DetachCurrentThread(JavaVM *vm)  {
   HOTSPOT_JNI_DETACHCURRENTTHREAD_ENTRY(vm);
-  VM_Exit::block_if_vm_exited();
 
   JNIWrapper("DetachCurrentThread");
 
   // If the thread has already been detached the operation is a no-op
   if (Thread::current_or_null() == NULL) {
-  HOTSPOT_JNI_DETACHCURRENTTHREAD_RETURN(JNI_OK);
+    HOTSPOT_JNI_DETACHCURRENTTHREAD_RETURN(JNI_OK);
     return JNI_OK;
   }
 
+  VM_Exit::block_if_vm_exited();
+
   JavaThread* thread = JavaThread::current();
   if (thread->has_last_Java_frame()) {
-  HOTSPOT_JNI_DETACHCURRENTTHREAD_RETURN((uint32_t) JNI_ERR);
+    HOTSPOT_JNI_DETACHCURRENTTHREAD_RETURN((uint32_t) JNI_ERR);
     // Can't detach a thread that's running java, that can't work.
     return JNI_ERR;
   }
 
   // Safepoint support. Have to do call-back to safepoint code, if in the
-  // middel of a safepoint operation
+  // middle of a safepoint operation
   ThreadStateTransition::transition_from_native(thread, _thread_in_vm);
 
   // XXX: Note that JavaThread::exit() call below removes the guards on the

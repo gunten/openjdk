@@ -203,7 +203,11 @@ void VM_Version::get_processor_features() {
     if (FLAG_IS_DEFAULT(UseSIMDForMemoryOps)) {
       FLAG_SET_DEFAULT(UseSIMDForMemoryOps, (_variant > 0));
     }
+    if (FLAG_IS_DEFAULT(UseSIMDForArrayEquals)) {
+      FLAG_SET_DEFAULT(UseSIMDForArrayEquals, false);
+    }
   }
+
   // ThunderX2
   if ((_cpu == CPU_CAVIUM && (_model == 0xAF)) ||
       (_cpu == CPU_BROADCOM && (_model == 0x516))) {
@@ -213,12 +217,32 @@ void VM_Version::get_processor_features() {
     if (FLAG_IS_DEFAULT(UseSIMDForMemoryOps)) {
       FLAG_SET_DEFAULT(UseSIMDForMemoryOps, true);
     }
+#ifdef COMPILER2
     if (FLAG_IS_DEFAULT(UseFPUForSpilling)) {
       FLAG_SET_DEFAULT(UseFPUForSpilling, true);
     }
+#endif
   }
 
-  if (_cpu == CPU_ARM && (_model == 0xd03 || _model2 == 0xd03)) _features |= CPU_A53MAC;
+  // Cortex A53
+  if (_cpu == CPU_ARM && (_model == 0xd03 || _model2 == 0xd03)) {
+    _features |= CPU_A53MAC;
+    if (FLAG_IS_DEFAULT(UseSIMDForArrayEquals)) {
+      FLAG_SET_DEFAULT(UseSIMDForArrayEquals, false);
+    }
+  }
+
+  // Cortex A73
+  if (_cpu == CPU_ARM && (_model == 0xd09 || _model2 == 0xd09)) {
+    if (FLAG_IS_DEFAULT(SoftwarePrefetchHintDistance)) {
+      FLAG_SET_DEFAULT(SoftwarePrefetchHintDistance, -1);
+    }
+    // A73 is faster with short-and-easy-for-speculative-execution-loop
+    if (FLAG_IS_DEFAULT(UseSimpleArrayEquals)) {
+      FLAG_SET_DEFAULT(UseSimpleArrayEquals, true);
+    }
+  }
+
   if (_cpu == CPU_ARM && (_model == 0xd07 || _model2 == 0xd07)) _features |= CPU_STXR_PREFETCH;
   // If an olde style /proc/cpuinfo (cpu_lines == 1) then if _model is an A57 (0xd07)
   // we assume the worst and assume we could be on a big little system and have
@@ -362,6 +386,15 @@ void VM_Version::get_processor_features() {
     FLAG_SET_DEFAULT(UseUnalignedAccesses, true);
   }
 
+  if (FLAG_IS_DEFAULT(UseBarriersForVolatile)) {
+    UseBarriersForVolatile = (_features & CPU_DMB_ATOMICS) != 0;
+  }
+
+  if (FLAG_IS_DEFAULT(UsePopCountInstruction)) {
+    UsePopCountInstruction = true;
+  }
+
+#ifdef COMPILER2
   if (FLAG_IS_DEFAULT(UseMultiplyToLenIntrinsic)) {
     UseMultiplyToLenIntrinsic = true;
   }
@@ -374,14 +407,6 @@ void VM_Version::get_processor_features() {
     UseMulAddIntrinsic = true;
   }
 
-  if (FLAG_IS_DEFAULT(UseBarriersForVolatile)) {
-    UseBarriersForVolatile = (_features & CPU_DMB_ATOMICS) != 0;
-  }
-
-  if (FLAG_IS_DEFAULT(UsePopCountInstruction)) {
-    UsePopCountInstruction = true;
-  }
-
   if (FLAG_IS_DEFAULT(UseMontgomeryMultiplyIntrinsic)) {
     UseMontgomeryMultiplyIntrinsic = true;
   }
@@ -389,7 +414,6 @@ void VM_Version::get_processor_features() {
     UseMontgomerySquareIntrinsic = true;
   }
 
-#ifdef COMPILER2
   if (FLAG_IS_DEFAULT(OptoScheduling)) {
     OptoScheduling = true;
   }

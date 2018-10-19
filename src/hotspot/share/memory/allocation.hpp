@@ -37,20 +37,23 @@ public:
 };
 typedef AllocFailStrategy::AllocFailEnum AllocFailType;
 
-// All classes in the virtual machine must be subclassed
-// by one of the following allocation classes:
+// The virtual machine must never call one of the implicitly declared
+// global allocation or deletion functions.  (Such calls may result in
+// link-time or run-time errors.)  For convenience and documentation of
+// intended use, classes in the virtual machine may be derived from one
+// of the following allocation classes, some of which define allocation
+// and deletion functions.
+// Note: std::malloc and std::free should never called directly.
+
 //
 // For objects allocated in the resource area (see resourceArea.hpp).
 // - ResourceObj
 //
-// For objects allocated in the C-heap (managed by: free & malloc).
+// For objects allocated in the C-heap (managed by: free & malloc and tracked with NMT)
 // - CHeapObj
 //
 // For objects allocated on the stack.
 // - StackObj
-//
-// For embedded objects.
-// - ValueObj
 //
 // For classes used as name spaces.
 // - AllStatic
@@ -84,15 +87,10 @@ typedef AllocFailStrategy::AllocFailEnum AllocFailType;
 //   char* AllocateHeap(size_t size, const char* name);
 //   void  FreeHeap(void* p);
 //
-// C-heap allocation can be traced using +PrintHeapAllocation.
-// malloc and free should therefore never called directly.
-
-// Base class for objects allocated in the C-heap.
 
 // In non product mode we introduce a super class for all allocation classes
 // that supports printing.
-// We avoid the superclass in product mode since some C++ compilers add
-// a word overhead for empty super classes.
+// We avoid the superclass in product mode to save space.
 
 #ifdef PRODUCT
 #define ALLOCATION_SUPER_CLASS_SPEC
@@ -109,35 +107,42 @@ class AllocatedObj {
 };
 #endif
 
+#define MEMORY_TYPES_DO(f) \
+  /* Memory type by sub systems. It occupies lower byte. */  \
+  f(mtJavaHeap,      "Java Heap")   /* Java heap                                 */ \
+  f(mtClass,         "Class")       /* Java classes                              */ \
+  f(mtThread,        "Thread")      /* thread objects                            */ \
+  f(mtThreadStack,   "Thread Stack")                                                \
+  f(mtCode,          "Code")        /* generated code                            */ \
+  f(mtGC,            "GC")                                                          \
+  f(mtCompiler,      "Compiler")                                                    \
+  f(mtInternal,      "Internal")    /* memory used by VM, but does not belong to */ \
+                                    /* any of above categories, and not used by  */ \
+                                    /* NMT                                       */ \
+  f(mtOther,         "Other")       /* memory not used by VM                     */ \
+  f(mtSymbol,        "Symbol")                                                      \
+  f(mtNMT,           "Native Memory Tracking")  /* memory used by NMT            */ \
+  f(mtClassShared,   "Shared class space")      /* class data sharing            */ \
+  f(mtChunk,         "Arena Chunk") /* chunk that holds content of arenas        */ \
+  f(mtTest,          "Test")        /* Test type for verifying NMT               */ \
+  f(mtTracing,       "Tracing")                                                     \
+  f(mtLogging,       "Logging")                                                     \
+  f(mtArguments,     "Arguments")                                                   \
+  f(mtModule,        "Module")                                                      \
+  f(mtSafepoint,     "Safepoint")                                                   \
+  f(mtNone,          "Unknown")                                                     \
+  //end
+
+#define MEMORY_TYPE_DECLARE_ENUM(type, human_readable) \
+  type,
 
 /*
  * Memory types
  */
 enum MemoryType {
-  // Memory type by sub systems. It occupies lower byte.
-  mtJavaHeap          = 0x00,  // Java heap
-  mtClass             = 0x01,  // memory class for Java classes
-  mtThread            = 0x02,  // memory for thread objects
-  mtThreadStack       = 0x03,
-  mtCode              = 0x04,  // memory for generated code
-  mtGC                = 0x05,  // memory for GC
-  mtCompiler          = 0x06,  // memory for compiler
-  mtInternal          = 0x07,  // memory used by VM, but does not belong to
-                                 // any of above categories, and not used for
-                                 // native memory tracking
-  mtOther             = 0x08,  // memory not used by VM
-  mtSymbol            = 0x09,  // symbol
-  mtNMT               = 0x0A,  // memory used by native memory tracking
-  mtClassShared       = 0x0B,  // class data sharing
-  mtChunk             = 0x0C,  // chunk that holds content of arenas
-  mtTest              = 0x0D,  // Test type for verifying NMT
-  mtTracing           = 0x0E,  // memory used for Tracing
-  mtLogging           = 0x0F,  // memory for logging
-  mtArguments         = 0x10,  // memory for argument processing
-  mtModule            = 0x11,  // memory for module processing
-  mtNone              = 0x12,  // undefined
-  mt_number_of_types  = 0x13   // number of memory types (mtDontTrack
-                                 // is not included as validate type)
+  MEMORY_TYPES_DO(MEMORY_TYPE_DECLARE_ENUM)
+  mt_number_of_types   // number of memory types (mtDontTrack
+                       // is not included as validate type)
 };
 
 typedef MemoryType MEMFLAGS;
@@ -156,22 +161,61 @@ const bool NMT_track_callsite = false;
 class NativeCallStack;
 
 
+char* AllocateHeap(size_t size,
+                   MEMFLAGS flags,
+                   const NativeCallStack& stack,
+                   AllocFailType alloc_failmode = AllocFailStrategy::EXIT_OOM);
+char* AllocateHeap(size_t size,
+                   MEMFLAGS flags,
+                   AllocFailType alloc_failmode = AllocFailStrategy::EXIT_OOM);
+
+char* ReallocateHeap(char *old,
+                     size_t size,
+                     MEMFLAGS flag,
+                     AllocFailType alloc_failmode = AllocFailStrategy::EXIT_OOM);
+
+void FreeHeap(void* p);
+
 template <MEMFLAGS F> class CHeapObj ALLOCATION_SUPER_CLASS_SPEC {
  public:
-  NOINLINE void* operator new(size_t size, const NativeCallStack& stack) throw();
-  NOINLINE void* operator new(size_t size) throw();
-  NOINLINE void* operator new (size_t size, const std::nothrow_t&  nothrow_constant,
-                               const NativeCallStack& stack) throw();
-  NOINLINE void* operator new (size_t size, const std::nothrow_t&  nothrow_constant)
-                               throw();
-  NOINLINE void* operator new [](size_t size, const NativeCallStack& stack) throw();
-  NOINLINE void* operator new [](size_t size) throw();
-  NOINLINE void* operator new [](size_t size, const std::nothrow_t&  nothrow_constant,
-                               const NativeCallStack& stack) throw();
-  NOINLINE void* operator new [](size_t size, const std::nothrow_t&  nothrow_constant)
-                               throw();
-  void  operator delete(void* p);
-  void  operator delete [] (void* p);
+  ALWAYSINLINE void* operator new(size_t size) throw() {
+    return (void*)AllocateHeap(size, F);
+  }
+
+  ALWAYSINLINE void* operator new(size_t size,
+                                  const NativeCallStack& stack) throw() {
+    return (void*)AllocateHeap(size, F, stack);
+  }
+
+  ALWAYSINLINE void* operator new(size_t size, const std::nothrow_t&,
+                                  const NativeCallStack& stack) throw() {
+    return (void*)AllocateHeap(size, F, stack, AllocFailStrategy::RETURN_NULL);
+  }
+
+  ALWAYSINLINE void* operator new(size_t size, const std::nothrow_t&) throw() {
+    return (void*)AllocateHeap(size, F, AllocFailStrategy::RETURN_NULL);
+  }
+
+  ALWAYSINLINE void* operator new[](size_t size) throw() {
+    return (void*)AllocateHeap(size, F);
+  }
+
+  ALWAYSINLINE void* operator new[](size_t size,
+                                  const NativeCallStack& stack) throw() {
+    return (void*)AllocateHeap(size, F, stack);
+  }
+
+  ALWAYSINLINE void* operator new[](size_t size, const std::nothrow_t&,
+                                    const NativeCallStack& stack) throw() {
+    return (void*)AllocateHeap(size, F, stack, AllocFailStrategy::RETURN_NULL);
+  }
+
+  ALWAYSINLINE void* operator new[](size_t size, const std::nothrow_t&) throw() {
+    return (void*)AllocateHeap(size, F, AllocFailStrategy::RETURN_NULL);
+  }
+
+  void  operator delete(void* p)     { FreeHeap(p); }
+  void  operator delete [] (void* p) { FreeHeap(p); }
 };
 
 // Base class for objects allocated on the stack only.
@@ -187,33 +231,6 @@ class StackObj ALLOCATION_SUPER_CLASS_SPEC {
   void  operator delete(void* p);
   void  operator delete [](void* p);
 };
-
-// Base class for objects used as value objects.
-// Calling new or delete will result in fatal error.
-//
-// Portability note: Certain compilers (e.g. gcc) will
-// always make classes bigger if it has a superclass, even
-// if the superclass does not have any virtual methods or
-// instance fields. The HotSpot implementation relies on this
-// not to happen. So never make a ValueObj class a direct subclass
-// of this object, but use the VALUE_OBJ_CLASS_SPEC class instead, e.g.,
-// like this:
-//
-//   class A VALUE_OBJ_CLASS_SPEC {
-//     ...
-//   }
-//
-// With gcc and possible other compilers the VALUE_OBJ_CLASS_SPEC can
-// be defined as a an empty string "".
-//
-class _ValueObj {
- private:
-  void* operator new(size_t size) throw();
-  void  operator delete(void* p);
-  void* operator new [](size_t size) throw();
-  void  operator delete [](void* p);
-};
-
 
 // Base class for objects stored in Metaspace.
 // Calling delete will result in fatal error.
@@ -539,7 +556,7 @@ class MallocArrayAllocator : public AllStatic {
   static size_t size_for(size_t length);
 
   static E* allocate(size_t length, MEMFLAGS flags);
-  static void free(E* addr, size_t length);
+  static void free(E* addr);
 };
 
 #endif // SHARE_VM_MEMORY_ALLOCATION_HPP

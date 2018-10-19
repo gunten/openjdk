@@ -105,10 +105,6 @@ public class ClassReader {
      */
     public boolean readAllOfClassFile = false;
 
-    /** Switch: allow simplified varargs.
-     */
-    boolean allowSimplifiedVarargs;
-
     /** Switch: allow modules.
      */
     boolean allowModules;
@@ -147,6 +143,11 @@ public class ClassReader {
     JCDiagnostic.Factory diagFactory;
 
     DeferredCompletionFailureHandler dcfh;
+
+    /**
+     * Support for preview language features.
+     */
+    Preview preview;
 
     /** The current scope where type variables are entered.
      */
@@ -270,7 +271,7 @@ public class ClassReader {
         verbose         = options.isSet(Option.VERBOSE);
 
         Source source = Source.instance(context);
-        allowSimplifiedVarargs = Feature.SIMPLIFIED_VARARGS.allowedInSource(source);
+        preview = Preview.instance(context);
         allowModules     = Feature.MODULES.allowedInSource(source);
 
         saveParameterNames = options.isSet(PARAMETERS);
@@ -1638,9 +1639,9 @@ public class ClassReader {
         }
         ListBuffer<CompoundAnnotationProxy> proxies = new ListBuffer<>();
         for (CompoundAnnotationProxy proxy : annotations) {
-            if (proxy.type.tsym == syms.proprietaryType.tsym)
+            if (proxy.type.tsym.flatName() == syms.proprietaryType.tsym.flatName())
                 sym.flags_field |= PROPRIETARY;
-            else if (proxy.type.tsym == syms.profileType.tsym) {
+            else if (proxy.type.tsym.flatName() == syms.profileType.tsym.flatName()) {
                 if (profile != Profile.DEFAULT) {
                     for (Pair<Name, Attribute> v : proxy.values) {
                         if (v.fst == names.value && v.snd instanceof Attribute.Constant) {
@@ -2465,6 +2466,9 @@ public class ClassReader {
     }
 
     private List<Type> adjustMethodParams(long flags, List<Type> args) {
+        if (args.isEmpty()) {
+            return args;
+        }
         boolean isVarargs = (flags & VARARGS) != 0;
         if (isVarargs) {
             Type varargsElem = args.last();
@@ -2641,8 +2645,6 @@ public class ClassReader {
     }
 
     protected ClassSymbol enterClass(Name name) {
-        if (syms.proprietaryType.tsym.flatName() == name)
-            return (ClassSymbol) syms.proprietaryType.tsym;
         return syms.enterClass(currentModule, name);
     }
 
@@ -2784,6 +2786,14 @@ public class ClassReader {
                                    Integer.toString(minorVersion),
                                    Integer.toString(maxMajor),
                                    Integer.toString(maxMinor));
+        }
+
+        if (minorVersion == ClassFile.PREVIEW_MINOR_VERSION) {
+            if (!preview.isEnabled()) {
+                log.error(preview.disabledError(currentClassFile, majorVersion));
+            } else {
+                preview.warnPreview(c.classfile, majorVersion);
+            }
         }
 
         indexPool();

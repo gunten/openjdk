@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -91,6 +91,11 @@ int CompiledStaticCall::reloc_to_interp_stub() {
 }
 #endif // COMPILER2_OR_JVMCI
 
+int CompiledStaticCall::to_trampoline_stub_size() {
+  // ARM doesn't use trampolines.
+  return 0;
+}
+
 // size of C2 call stub, compiled java to interpretor
 int CompiledStaticCall::to_interp_stub_size() {
   return 8 * NativeInstruction::instruction_size;
@@ -150,9 +155,7 @@ void CompiledDirectStaticCall::set_stub_to_clean(static_stub_Relocation* static_
 void CompiledDirectStaticCall::verify() {
   // Verify call.
   _call->verify();
-  if (os::is_MP()) {
-    _call->verify_alignment();
-  }
+  _call->verify_alignment();
 
   // Verify stub.
   address stub = find_stub(/*is_aot*/ false);

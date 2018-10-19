@@ -23,6 +23,7 @@
  */
 
 #include "precompiled.hpp"
+#include "gc/shared/barrierSet.hpp"
 #include "opto/arraycopynode.hpp"
 #include "oops/objArrayKlass.hpp"
 #include "opto/convertnode.hpp"
@@ -550,9 +551,9 @@ Node* PhaseMacroExpand::generate_arraycopy(ArrayCopyNode *ac, AllocateArrayNode*
     }
     // At this point we know we do not need type checks on oop stores.
 
-    // Let's see if we need card marks:
-    if (alloc != NULL && GraphKit::use_ReduceInitialCardMarks()) {
-      // If we do not need card marks, copy using the jint or jlong stub.
+    BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
+    if (!bs->array_copy_requires_gc_barriers(alloc != NULL, copy_type, false, BarrierSetC2::Expansion)) {
+      // If we do not need gc barriers, copy using the jint or jlong stub.
       copy_type = LP64_ONLY(UseCompressedOops ? T_INT : T_LONG) NOT_LP64(T_INT);
       assert(type2aelembytes(basic_elem_type) == type2aelembytes(copy_type),
              "sizes agree");
@@ -1125,9 +1126,6 @@ void PhaseMacroExpand::expand_arraycopy_node(ArrayCopyNode *ac) {
     const TypePtr* adr_type = _igvn.type(dest)->is_oopptr()->add_offset(Type::OffsetBot);
     if (ac->_dest_type != TypeOopPtr::BOTTOM) {
       adr_type = ac->_dest_type->add_offset(Type::OffsetBot)->is_ptr();
-    }
-    if (ac->_src_type != ac->_dest_type) {
-      adr_type = TypeRawPtr::BOTTOM;
     }
     generate_arraycopy(ac, alloc, &ctrl, merge_mem, &io,
                        adr_type, T_OBJECT,

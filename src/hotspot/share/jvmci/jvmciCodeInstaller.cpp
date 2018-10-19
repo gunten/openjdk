@@ -34,13 +34,16 @@
 #include "jvmci/jvmciJavaClasses.hpp"
 #include "jvmci/jvmciCompilerToVM.hpp"
 #include "jvmci/jvmciRuntime.hpp"
+#include "memory/allocation.inline.hpp"
 #include "oops/arrayOop.inline.hpp"
 #include "oops/oop.inline.hpp"
 #include "oops/objArrayOop.inline.hpp"
 #include "oops/typeArrayOop.inline.hpp"
+#include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/javaCalls.hpp"
 #include "runtime/jniHandles.inline.hpp"
 #include "runtime/safepointMechanism.inline.hpp"
+#include "runtime/sharedRuntime.hpp"
 #include "utilities/align.hpp"
 
 // frequently used constants
@@ -133,7 +136,10 @@ OopMap* CodeInstaller::create_oop_map(Handle debug_info, TRAPS) {
   if (!reference_map->is_a(HotSpotReferenceMap::klass())) {
     JVMCI_ERROR_NULL("unknown reference map: %s", reference_map->klass()->signature_name());
   }
-  if (HotSpotReferenceMap::maxRegisterSize(reference_map) > 16) {
+  if (!_has_wide_vector && SharedRuntime::is_wide_vector(HotSpotReferenceMap::maxRegisterSize(reference_map))) {
+    if (SharedRuntime::polling_page_vectors_safepoint_handler_blob() == NULL) {
+      JVMCI_ERROR_NULL("JVMCI is producing code using vectors larger than the runtime supports");
+    }
     _has_wide_vector = true;
   }
   OopMap* map = new OopMap(_total_frame_size, _parameter_count);
@@ -228,8 +234,10 @@ int AOTOopRecorder::find_index(Metadata* h) {
 
   vmassert(index + 1 == newCount, "must be last");
 
-  Klass* klass = NULL;
+  JVMCIKlassHandle klass(THREAD);
   oop result = NULL;
+  guarantee(h != NULL,
+            "If DebugInformationRecorder::describe_scope passes NULL oldCount == newCount must hold.");
   if (h->is_klass()) {
     klass = (Klass*) h;
     result = CompilerToVM::get_jvmci_type(klass, CATCH);
@@ -585,6 +593,9 @@ JVMCIEnv::CodeInstallResult CodeInstaller::gather_metadata(Handle target, Handle
   // Get instructions and constants CodeSections early because we need it.
   _instructions = buffer.insts();
   _constants = buffer.consts();
+#if INCLUDE_AOT
+  buffer.set_immutable_PIC(_immutable_pic_compilation);
+#endif
 
   initialize_fields(target(), JNIHandles::resolve(compiled_code_obj), CHECK_OK);
   JVMCIEnv::CodeInstallResult result = initialize_buffer(buffer, false, CHECK_OK);
@@ -618,6 +629,9 @@ JVMCIEnv::CodeInstallResult CodeInstaller::install(JVMCICompiler* compiler, Hand
   // Get instructions and constants CodeSections early because we need it.
   _instructions = buffer.insts();
   _constants = buffer.consts();
+#if INCLUDE_AOT
+  buffer.set_immutable_PIC(_immutable_pic_compilation);
+#endif
 
   initialize_fields(target(), JNIHandles::resolve(compiled_code_obj), CHECK_OK);
   JVMCIEnv::CodeInstallResult result = initialize_buffer(buffer, true, CHECK_OK);
@@ -629,7 +643,7 @@ JVMCIEnv::CodeInstallResult CodeInstaller::install(JVMCICompiler* compiler, Hand
 
   if (!compiled_code->is_a(HotSpotCompiledNmethod::klass())) {
     oop stubName = HotSpotCompiledCode::name(compiled_code_obj);
-    if (oopDesc::is_null(stubName)) {
+    if (stubName == NULL) {
       JVMCI_ERROR_OK("stub should have a name");
     }
     char* name = strdup(java_lang_String::as_utf8_string(stubName));
@@ -954,8 +968,8 @@ void CodeInstaller::assumption_ConcreteMethod(Thread* thread, Handle assumption)
 }
 
 void CodeInstaller::assumption_CallSiteTargetValue(Thread* thread, Handle assumption) {
-  Handle callSite(thread, Assumptions_CallSiteTargetValue::callSite(assumption()));
-  Handle methodHandle(thread, Assumptions_CallSiteTargetValue::methodHandle(assumption()));
+  Handle callSite(thread, HotSpotObjectConstantImpl::object(Assumptions_CallSiteTargetValue::callSite(assumption())));
+  Handle methodHandle(thread, HotSpotObjectConstantImpl::object(Assumptions_CallSiteTargetValue::methodHandle(assumption())));
 
   _dependencies->assert_call_site_target_value(callSite(), methodHandle());
 }
@@ -1036,6 +1050,26 @@ void CodeInstaller::record_scope(jint pc_offset, Handle debug_info, ScopeMode sc
   record_scope(pc_offset, position, scope_mode, objectMapping, return_oop, CHECK);
 }
 
+int CodeInstaller::map_jvmci_bci(int bci) {
+  if (bci < 0) {
+    if (bci == BytecodeFrame::BEFORE_BCI()) {
+      return BeforeBci;
+    } else if (bci == BytecodeFrame::AFTER_BCI()) {
+      return AfterBci;
+    } else if (bci == BytecodeFrame::UNWIND_BCI()) {
+      return UnwindBci;
+    } else if (bci == BytecodeFrame::AFTER_EXCEPTION_BCI()) {
+      return AfterExceptionBci;
+    } else if (bci == BytecodeFrame::UNKNOWN_BCI()) {
+      return UnknownBci;
+    } else if (bci == BytecodeFrame::INVALID_FRAMESTATE_BCI()) {
+      return InvalidFrameStateBci;
+    }
+    ShouldNotReachHere();
+  }
+  return bci;
+}
+
 void CodeInstaller::record_scope(jint pc_offset, Handle position, ScopeMode scope_mode, GrowableArray<ScopeValue*>* objects, bool return_oop, TRAPS) {
   Handle frame;
   if (scope_mode == CodeInstaller::FullFrame) {
@@ -1051,16 +1085,13 @@ void CodeInstaller::record_scope(jint pc_offset, Handle position, ScopeMode scop
 
   Handle hotspot_method (THREAD, BytecodePosition::method(position));
   Method* method = getMethodFromHotSpotMethod(hotspot_method());
-  jint bci = BytecodePosition::bci(position);
-  if (bci == BytecodeFrame::BEFORE_BCI()) {
-    bci = SynchronizationEntryBCI;
-  }
+  jint bci = map_jvmci_bci(BytecodePosition::bci(position));
 
   TRACE_jvmci_2("Recording scope pc_offset=%d bci=%d method=%s", pc_offset, bci, method->name_and_sig_as_C_string());
 
   bool reexecute = false;
   if (frame.not_null()) {
-    if (bci == SynchronizationEntryBCI){
+    if (bci < 0) {
        reexecute = false;
     } else {
       Bytecodes::Code code = Bytecodes::java_code_at(method, method->bcp_from(bci));

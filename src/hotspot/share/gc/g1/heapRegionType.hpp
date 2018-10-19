@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,12 +26,11 @@
 #define SHARE_VM_GC_G1_HEAPREGIONTYPE_HPP
 
 #include "gc/g1/g1HeapRegionTraceType.hpp"
-#include "memory/allocation.hpp"
 
 #define hrt_assert_is_valid(tag) \
   assert(is_valid((tag)), "invalid HR type: %u", (uint) (tag))
 
-class HeapRegionType VALUE_OBJ_CLASS_SPEC {
+class HeapRegionType {
 friend class VMStructs;
 
 private:
@@ -87,8 +86,8 @@ private:
     // Objects within these regions are allowed to have references to objects
     // contained in any other kind of regions.
     ArchiveMask           = 32,
-    OpenArchiveTag        = ArchiveMask | PinnedMask | OldMask,
-    ClosedArchiveTag      = ArchiveMask | PinnedMask | OldMask + 1
+    OpenArchiveTag        = ArchiveMask | PinnedMask,
+    ClosedArchiveTag      = ArchiveMask | PinnedMask + 1
   } Tag;
 
   volatile Tag _tag;
@@ -139,6 +138,8 @@ public:
   bool is_old() const { return (get() & OldMask) != 0; }
 
   bool is_old_or_humongous() const { return (get() & (OldMask | HumongousMask)) != 0; }
+
+  bool is_old_or_humongous_or_archive() const { return (get() & (OldMask | HumongousMask | ArchiveMask)) != 0; }
 
   // is_pinned regions may be archive or humongous
   bool is_pinned() const { return (get() & PinnedMask) != 0; }

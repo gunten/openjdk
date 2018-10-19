@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,13 +36,14 @@
 #include "memory/resourceArea.hpp"
 #include "oops/instanceKlass.hpp"
 #include "oops/oop.inline.hpp"
+#include "runtime/frame.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/objectMonitor.hpp"
 #include "runtime/objectMonitor.inline.hpp"
 #include "runtime/signature.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "runtime/synchronizer.hpp"
-#include "runtime/vframe.hpp"
+#include "runtime/vframe.inline.hpp"
 #include "runtime/vframeArray.hpp"
 #include "runtime/vframe_hp.hpp"
 
@@ -133,7 +134,7 @@ GrowableArray<MonitorInfo*>* javaVFrame::locked_monitors() {
     //
     // Skip the monitor that the thread is blocked to enter or waiting on
     //
-    if (!found_first_monitor && (obj == pending_obj || obj == waiting_obj)) {
+    if (!found_first_monitor && (oopDesc::equals(obj, pending_obj) || oopDesc::equals(obj, waiting_obj))) {
       continue;
     }
     found_first_monitor = true;
@@ -254,11 +255,6 @@ void javaVFrame::print_lock_info_on(outputStream* st, int frame_count) {
           }
         }
         print_locked_object_class_name(st, Handle(THREAD, monitor->owner()), lock_state);
-        if (ObjectMonitor::Knob_Verbose && mark != NULL) {
-          st->print("\t- lockbits=");
-          mark->print_on(st);
-          st->cr();
-        }
 
         found_first_monitor = true;
       }

@@ -37,7 +37,7 @@
  *          jdk.internal.jvmstat/sun.jvmstat.monitor
  * @compile ../../test-classes/EmptyClassHelper.java
  * @compile ../../test-classes/com/sun/tools/javac/Main.jasm
- * @run main EmptyClassInBootClassPath
+ * @run driver EmptyClassInBootClassPath
  */
 
 import java.io.File;
@@ -89,13 +89,15 @@ public class EmptyClassInBootClassPath {
         argsList.add("useAppLoader");
         opts = new String[argsList.size()];
         opts = argsList.toArray(opts);
-        TestCommon.run(opts).assertNormalExit(EXPECTED_EXCEPTION);
+        TestCommon.run(opts)
+            .assertSilentlyDisabledCDS(0, EXPECTED_EXCEPTION);
 
         // case 4: load class in bootclasspath using boot loader with '--limit-modules java.base'
         argsList.remove(argsList.size() - 1);
         argsList.add("useBootLoader");
         opts = new String[argsList.size()];
         opts = argsList.toArray(opts);
-        TestCommon.run(opts).assertNormalExit(EXPECTED_EXCEPTION);
+        TestCommon.run(opts)
+            .assertSilentlyDisabledCDS(0, EXPECTED_EXCEPTION);
     }
 }

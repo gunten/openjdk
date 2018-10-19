@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,13 +26,15 @@
 #include "jvm.h"
 #include "aot/aotLoader.hpp"
 #include "classfile/classLoader.hpp"
+#include "classfile/classLoaderDataGraph.hpp"
 #include "classfile/stringTable.hpp"
 #include "classfile/systemDictionary.hpp"
 #include "code/codeCache.hpp"
 #include "compiler/compileBroker.hpp"
 #include "compiler/compilerOracle.hpp"
-#include "gc/shared/genCollectedHeap.hpp"
 #include "interpreter/bytecodeHistogram.hpp"
+#include "jfr/jfrEvents.hpp"
+#include "jfr/support/jfrThreadId.hpp"
 #if INCLUDE_JVMCI
 #include "jvmci/jvmciCompiler.hpp"
 #include "jvmci/jvmciRuntime.hpp"
@@ -55,8 +57,9 @@
 #include "runtime/biasedLocking.hpp"
 #include "runtime/compilationPolicy.hpp"
 #include "runtime/deoptimization.hpp"
+#include "runtime/flags/flagSetting.hpp"
 #include "runtime/init.hpp"
-#include "runtime/interfaceSupport.hpp"
+#include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/java.hpp"
 #include "runtime/memprofiler.hpp"
 #include "runtime/sharedRuntime.hpp"
@@ -67,17 +70,11 @@
 #include "runtime/timer.hpp"
 #include "runtime/vm_operations.hpp"
 #include "services/memTracker.hpp"
-#include "trace/traceMacros.hpp"
-#include "trace/tracing.hpp"
 #include "utilities/dtrace.hpp"
 #include "utilities/globalDefinitions.hpp"
 #include "utilities/histogram.hpp"
 #include "utilities/macros.hpp"
 #include "utilities/vmError.hpp"
-#if INCLUDE_ALL_GCS
-#include "gc/cms/concurrentMarkSweepThread.hpp"
-#include "gc/parallel/psScavenge.hpp"
-#endif // INCLUDE_ALL_GCS
 #ifdef COMPILER1
 #include "c1/c1_Compiler.hpp"
 #include "c1/c1_Runtime1.hpp"
@@ -88,6 +85,9 @@
 #include "opto/compile.hpp"
 #include "opto/indexSet.hpp"
 #include "opto/runtime.hpp"
+#endif
+#if INCLUDE_JFR
+#include "jfr/jfr.hpp"
 #endif
 
 GrowableArray<Method*>* collected_profiled_methods;
@@ -267,17 +267,17 @@ void print_statistics() {
     IndexSet::print_statistics();
   }
 #endif // ASSERT
-#else
-#ifdef INCLUDE_JVMCI
+#else // COMPILER2
+#if INCLUDE_JVMCI
 #ifndef COMPILER1
   if ((TraceDeoptimization || LogVMOutput || LogCompilation) && UseCompiler) {
     FlagSetting fs(DisplayVMOutput, DisplayVMOutput && TraceDeoptimization);
     Deoptimization::print_statistics();
     SharedRuntime::print_statistics();
   }
-#endif
-#endif
-#endif
+#endif // COMPILER1
+#endif // INCLUDE_JVMCI
+#endif // COMPILER2
 
   if (PrintAOTStatistics) {
     AOTLoader::print_statistics();
@@ -316,8 +316,13 @@ void print_statistics() {
     CodeCache::print();
   }
 
-  if (PrintMethodFlushingStatistics) {
-    NMethodSweeper::print();
+  // CodeHeap State Analytics.
+  // Does also call NMethodSweeper::print(tty)
+  LogTarget(Trace, codecache) lt;
+  if (lt.is_enabled()) {
+    CompileBroker::print_heapinfo(NULL, "all", "4096"); // details
+  } else if (PrintMethodFlushingStatistics) {
+    NMethodSweeper::print(tty);
   }
 
   if (PrintCodeCache2) {
@@ -329,7 +334,7 @@ void print_statistics() {
     klassVtable::print_statistics();
     klassItable::print_statistics();
   }
-  if (VerifyOops) {
+  if (VerifyOops && Verbose) {
     tty->print_cr("+VerifyOops count: %d", StubRoutines::verify_oop_count());
   }
 
@@ -341,7 +346,10 @@ void print_statistics() {
   }
 
   if (PrintSystemDictionaryAtExit) {
+    ResourceMark rm;
+    MutexLocker mcld(ClassLoaderDataGraph_lock);
     SystemDictionary::print();
+    ClassLoaderDataGraph::print();
   }
 
   if (LogTouchedMethods && PrintTouchedMethodsAtExit) {
@@ -377,8 +385,13 @@ void print_statistics() {
     CodeCache::print();
   }
 
-  if (PrintMethodFlushingStatistics) {
-    NMethodSweeper::print();
+  // CodeHeap State Analytics.
+  // Does also call NMethodSweeper::print(tty)
+  LogTarget(Trace, codecache) lt;
+  if (lt.is_enabled()) {
+    CompileBroker::print_heapinfo(NULL, "all", "4096"); // details
+  } else if (PrintMethodFlushingStatistics) {
+    NMethodSweeper::print(tty);
   }
 
 #ifdef COMPILER2
@@ -456,11 +469,11 @@ void before_exit(JavaThread* thread) {
 
   EventThreadEnd event;
   if (event.should_commit()) {
-    event.set_thread(THREAD_TRACE_ID(thread));
+    event.set_thread(JFR_THREAD_ID(thread));
     event.commit();
   }
 
-  TRACE_VM_EXIT();
+  JFR_ONLY(Jfr::on_vm_shutdown();)
 
   // Stop the WatcherThread. We do this before disenrolling various
   // PeriodicTasks to reduce the likelihood of races.
@@ -483,7 +496,8 @@ void before_exit(JavaThread* thread) {
     Universe::print_on(&ls_info);
     if (log.is_trace()) {
       LogStream ls_trace(log.trace());
-      ClassLoaderDataGraph::dump_on(&ls_trace);
+      MutexLocker mcld(ClassLoaderDataGraph_lock);
+      ClassLoaderDataGraph::print_on(&ls_trace);
     }
   }
 
@@ -513,14 +527,9 @@ void before_exit(JavaThread* thread) {
   }
 
   if (VerifyStringTableAtExit) {
-    int fail_cnt = 0;
-    {
-      MutexLocker ml(StringTable_lock);
-      fail_cnt = StringTable::verify_and_compare_entries();
-    }
-
+    size_t fail_cnt = StringTable::verify_and_compare_entries();
     if (fail_cnt != 0) {
-      tty->print_cr("ERROR: fail_cnt=%d", fail_cnt);
+      tty->print_cr("ERROR: fail_cnt=" SIZE_FORMAT, fail_cnt);
       guarantee(fail_cnt == 0, "unexpected StringTable verification failures");
     }
   }
@@ -566,9 +575,6 @@ void vm_direct_exit(int code) {
 }
 
 void vm_perform_shutdown_actions() {
-  // Warning: do not call 'exit_globals()' here. All threads are still running.
-  // Calling 'exit_globals()' will disable thread-local-storage and cause all
-  // kinds of assertions to trigger in debug mode.
   if (is_init_completed()) {
     Thread* thread = Thread::current_or_null();
     if (thread != NULL && thread->is_Java_thread()) {

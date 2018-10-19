@@ -38,11 +38,7 @@ class MacroAssembler: public Assembler {
   friend class LIR_Assembler;
   friend class Runtime1;      // as_Address()
 
- protected:
-
-  Address as_Address(AddressLiteral adr);
-  Address as_Address(ArrayAddress adr);
-
+ public:
   // Support for VM calls
   //
   // This is the base routine called by the different versions of call_VM_leaf. The interpreter
@@ -54,6 +50,7 @@ class MacroAssembler: public Assembler {
     int     number_of_arguments        // the number of arguments to pop after the call
   );
 
+ protected:
   // This is the base routine called by the different versions of call_VM. The interpreter
   // may customize this version by overriding it for its purposes (e.g., to save/restore
   // additional registers when doing a VM call).
@@ -87,6 +84,9 @@ class MacroAssembler: public Assembler {
  virtual void check_and_handle_popframe(Register java_thread);
  virtual void check_and_handle_earlyret(Register java_thread);
 
+  Address as_Address(AddressLiteral adr);
+  Address as_Address(ArrayAddress adr);
+
   // Support for NULL-checks
   //
   // Generates code that causes a NULL OS exception if the content of reg is NULL.
@@ -99,7 +99,7 @@ class MacroAssembler: public Assembler {
 
   // Required platform-specific helpers for Label::patch_instructions.
   // They _shadow_ the declarations in AbstractAssembler, which are undefined.
-  void pd_patch_instruction(address branch, address target) {
+  void pd_patch_instruction(address branch, address target, const char* file, int line) {
     unsigned char op = branch[0];
     assert(op == 0xE8 /* call */ ||
         op == 0xE9 /* jmp */ ||
@@ -113,7 +113,7 @@ class MacroAssembler: public Assembler {
       // short offset operators (jmp and jcc)
       char* disp = (char*) &branch[1];
       int imm8 = target - (address) &disp[1];
-      guarantee(this->is8bit(imm8), "Short forward jump exceeds 8-bit offset");
+      guarantee(this->is8bit(imm8), "Short forward jump exceeds 8-bit offset at %s:%d", file, line);
       *disp = imm8;
     } else {
       int* disp = (int*) &branch[(op == 0x0F || op == 0xC7)? 2: 1];
@@ -156,9 +156,11 @@ class MacroAssembler: public Assembler {
   void incrementq(Register reg, int value = 1);
   void incrementq(Address dst, int value = 1);
 
+#ifdef COMPILER2
   // special instructions for EVEX
   void setvectmask(Register dst, Register src);
   void restorevectmask();
+#endif
 
   // Support optimal SSE move instructions.
   void movflt(XMMRegister dst, XMMRegister src) {
@@ -293,29 +295,9 @@ class MacroAssembler: public Assembler {
   // thread in the default location (r15_thread on 64bit)
   void reset_last_Java_frame(bool clear_fp);
 
-  // Stores
-  void store_check(Register obj);                // store check for obj - register is destroyed afterwards
-  void store_check(Register obj, Address dst);   // same as above, dst is exact store location (reg. is destroyed)
-
-  void resolve_jobject(Register value, Register thread, Register tmp);
+  // jobjects
   void clear_jweak_tag(Register possibly_jweak);
-
-#if INCLUDE_ALL_GCS
-
-  void g1_write_barrier_pre(Register obj,
-                            Register pre_val,
-                            Register thread,
-                            Register tmp,
-                            bool tosca_live,
-                            bool expand_call);
-
-  void g1_write_barrier_post(Register store_addr,
-                             Register new_val,
-                             Register thread,
-                             Register tmp,
-                             Register tmp2);
-
-#endif // INCLUDE_ALL_GCS
+  void resolve_jobject(Register value, Register thread, Register tmp);
 
   // C 'boolean' to Java boolean: x == 0 ? 0 : 1
   void c2bool(Register x);
@@ -327,17 +309,28 @@ class MacroAssembler: public Assembler {
   void movbool(Address dst, Register src);
   void testbool(Register dst);
 
-  void resolve_oop_handle(Register result);
-  void load_mirror(Register mirror, Register method);
+  void resolve_oop_handle(Register result, Register tmp = rscratch2);
+  void load_mirror(Register mirror, Register method, Register tmp = rscratch2);
 
   // oop manipulations
   void load_klass(Register dst, Register src);
   void store_klass(Register dst, Register src);
 
-  void load_heap_oop(Register dst, Address src);
-  void load_heap_oop_not_null(Register dst, Address src);
-  void store_heap_oop(Address dst, Register src);
-  void cmp_heap_oop(Register src1, Address src2, Register tmp = noreg);
+  void access_load_at(BasicType type, DecoratorSet decorators, Register dst, Address src,
+                      Register tmp1, Register thread_tmp);
+  void access_store_at(BasicType type, DecoratorSet decorators, Address dst, Register src,
+                       Register tmp1, Register tmp2);
+
+  // Resolves obj access. Result is placed in the same register.
+  // All other registers are preserved.
+  void resolve(DecoratorSet decorators, Register obj);
+
+  void load_heap_oop(Register dst, Address src, Register tmp1 = noreg,
+                     Register thread_tmp = noreg, DecoratorSet decorators = 0);
+  void load_heap_oop_not_null(Register dst, Address src, Register tmp1 = noreg,
+                              Register thread_tmp = noreg, DecoratorSet decorators = 0);
+  void store_heap_oop(Address dst, Register src, Register tmp1 = noreg,
+                      Register tmp2 = noreg, DecoratorSet decorators = 0);
 
   // Used for storing NULL. All other oop constants should be
   // stored using routines that take a jobject.
@@ -517,6 +510,7 @@ class MacroAssembler: public Assembler {
 
   // allocation
   void eden_allocate(
+    Register thread,                   // Current thread
     Register obj,                      // result: pointer to object after successful allocation
     Register var_size_in_bytes,        // object size in bytes if unknown at compile time; invalid otherwise
     int      con_size_in_bytes,        // object size in bytes if   known at compile time
@@ -524,6 +518,7 @@ class MacroAssembler: public Assembler {
     Label&   slow_case                 // continuation point if fast allocation fails
   );
   void tlab_allocate(
+    Register thread,                   // Current thread
     Register obj,                      // result: pointer to object after successful allocation
     Register var_size_in_bytes,        // object size in bytes if unknown at compile time; invalid otherwise
     int      con_size_in_bytes,        // object size in bytes if   known at compile time
@@ -532,10 +527,6 @@ class MacroAssembler: public Assembler {
     Label&   slow_case                 // continuation point if fast allocation fails
   );
   void zero_memory(Register address, Register length_in_bytes, int offset_in_bytes, Register temp);
-
-  void incr_allocated_bytes(Register thread,
-                            Register var_size_in_bytes, int con_size_in_bytes,
-                            Register t1 = noreg);
 
   // interface method calling
   void lookup_interface_method(Register recv_klass,
@@ -754,11 +745,13 @@ class MacroAssembler: public Assembler {
   void cmpklass(Address dst, Metadata* obj);
   void cmpklass(Register dst, Metadata* obj);
   void cmpoop(Address dst, jobject obj);
+  void cmpoop_raw(Address dst, jobject obj);
 #endif // _LP64
 
   void cmpoop(Register src1, Register src2);
   void cmpoop(Register src1, Address src2);
   void cmpoop(Register dst, jobject obj);
+  void cmpoop_raw(Register dst, jobject obj);
 
   // NOTE src2 must be the lval. This is NOT an mem-mem compare
   void cmpptr(Address src1, AddressLiteral src2);
@@ -849,6 +842,7 @@ class MacroAssembler: public Assembler {
   void orptr(Address dst, int32_t imm32) { LP64_ONLY(orq(dst, imm32)) NOT_LP64(orl(dst, imm32)); }
 
   void testptr(Register src, int32_t imm32) {  LP64_ONLY(testq(src, imm32)) NOT_LP64(testl(src, imm32)); }
+  void testptr(Register src1, Address src2) { LP64_ONLY(testq(src1, src2)) NOT_LP64(testl(src1, src2)); }
   void testptr(Register src1, Register src2);
 
   void xorptr(Register dst, Register src) { LP64_ONLY(xorq(dst, src)) NOT_LP64(xorl(dst, src)); }
@@ -1107,6 +1101,10 @@ public:
   void vmovdqu(XMMRegister dst, Address src);
   void vmovdqu(XMMRegister dst, XMMRegister src);
   void vmovdqu(XMMRegister dst, AddressLiteral src);
+  void evmovdquq(XMMRegister dst, Address src, int vector_len) { Assembler::evmovdquq(dst, src, vector_len); }
+  void evmovdquq(XMMRegister dst, XMMRegister src, int vector_len) { Assembler::evmovdquq(dst, src, vector_len); }
+  void evmovdquq(Address dst, XMMRegister src, int vector_len) { Assembler::evmovdquq(dst, src, vector_len); }
+  void evmovdquq(XMMRegister dst, AddressLiteral src, int vector_len, Register rscratch);
 
   // Move Aligned Double Quadword
   void movdqa(XMMRegister dst, Address src)       { Assembler::movdqa(dst, src); }
@@ -1214,12 +1212,16 @@ public:
   void vpand(XMMRegister dst, XMMRegister nds, Address src, int vector_len) { Assembler::vpand(dst, nds, src, vector_len); }
   void vpand(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len);
 
-  void vpbroadcastw(XMMRegister dst, XMMRegister src);
+  void vpbroadcastw(XMMRegister dst, XMMRegister src, int vector_len);
+  void vpbroadcastw(XMMRegister dst, Address src, int vector_len) { Assembler::vpbroadcastw(dst, src, vector_len); }
 
   void vpcmpeqb(XMMRegister dst, XMMRegister nds, XMMRegister src, int vector_len);
+
   void vpcmpeqw(XMMRegister dst, XMMRegister nds, XMMRegister src, int vector_len);
 
   void vpmovzxbw(XMMRegister dst, Address src, int vector_len);
+  void vpmovzxbw(XMMRegister dst, XMMRegister src, int vector_len) { Assembler::vpmovzxbw(dst, src, vector_len); }
+
   void vpmovmskb(Register dst, XMMRegister src);
 
   void vpmullw(XMMRegister dst, XMMRegister nds, XMMRegister src, int vector_len);
@@ -1498,6 +1500,14 @@ public:
     // 0x11 - multiply upper 64 bits [64:127]
     Assembler::vpclmulqdq(dst, nds, src, 0x11);
   }
+  void evpclmulldq(XMMRegister dst, XMMRegister nds, XMMRegister src, int vector_len) {
+    // 0x00 - multiply lower 64 bits [0:63]
+    Assembler::evpclmulqdq(dst, nds, src, 0x00, vector_len);
+  }
+  void evpclmulhdq(XMMRegister dst, XMMRegister nds, XMMRegister src, int vector_len) {
+    // 0x11 - multiply upper 64 bits [64:127]
+    Assembler::evpclmulqdq(dst, nds, src, 0x11, vector_len);
+  }
 
   // Data
 
@@ -1578,11 +1588,14 @@ public:
   void movl2ptr(Register dst, Register src) { LP64_ONLY(movslq(dst, src)) NOT_LP64(if (dst != src) movl(dst, src)); }
 
   // C2 compiled method's prolog code.
-  void verified_entry(int framesize, int stack_bang_size, bool fp_mode_24b);
+  void verified_entry(int framesize, int stack_bang_size, bool fp_mode_24b, bool is_stub);
 
   // clear memory of size 'cnt' qwords, starting at 'base';
   // if 'is_large' is set, do not try to produce short loop
-  void clear_mem(Register base, Register cnt, Register rtmp, bool is_large);
+  void clear_mem(Register base, Register cnt, Register rtmp, XMMRegister xtmp, bool is_large);
+
+  // clear memory of size 'cnt' qwords, starting at 'base' using XMM/YMM registers
+  void xmm_clear_mem(Register base, Register cnt, XMMRegister xtmp);
 
 #ifdef COMPILER2
   void string_indexof_char(Register str1, Register cnt1, Register ch, Register result,
@@ -1723,6 +1736,7 @@ public:
   // Fold 8-bit data
   void fold_8bit_crc32(Register crc, Register table, Register tmp);
   void fold_8bit_crc32(XMMRegister crc, Register table, XMMRegister xtmp, Register tmp);
+  void fold_128bit_crc32_avx512(XMMRegister xcrc, XMMRegister xK, XMMRegister xtmp, Register buf, int offset);
 
   // Compress char[] array to byte[].
   void char_array_compress(Register src, Register dst, Register len,

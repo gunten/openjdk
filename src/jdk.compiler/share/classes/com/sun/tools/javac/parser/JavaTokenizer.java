@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,6 +25,7 @@
 
 package com.sun.tools.javac.parser;
 
+import com.sun.tools.javac.code.Preview;
 import com.sun.tools.javac.code.Source;
 import com.sun.tools.javac.code.Source.Feature;
 import com.sun.tools.javac.parser.Tokens.Comment.CommentStyle;
@@ -52,6 +53,9 @@ public class JavaTokenizer {
     /** The source language setting.
      */
     private Source source;
+
+    /** The preview language setting. */
+    private Preview preview;
 
     /** The log to be used for error reporting.
      */
@@ -115,12 +119,20 @@ public class JavaTokenizer {
         this.log = fac.log;
         this.tokens = fac.tokens;
         this.source = fac.source;
+        this.preview = fac.preview;
         this.reader = reader;
     }
 
-    private void checkSourceLevel(int pos, Feature feature) {
-        if (!feature.allowedInSource(source)) {
+    protected void checkSourceLevel(int pos, Feature feature) {
+        if (preview.isPreview(feature) && !preview.isEnabled()) {
+            //preview feature without --preview flag, error
+            lexError(DiagnosticFlag.SOURCE_LEVEL, pos, preview.disabledError(feature));
+        } else if (!feature.allowedInSource(source)) {
+            //incompatible source level, error
             lexError(DiagnosticFlag.SOURCE_LEVEL, pos, feature.error(source.name));
+        } else if (preview.isPreview(feature)) {
+            //use of preview feature, warn
+            preview.warnPreview(pos, feature);
         }
     }
 
@@ -194,8 +206,6 @@ public class JavaTokenizer {
         do {
             if (reader.ch != '_') {
                 reader.putChar(false);
-            } else {
-                checkSourceLevel(pos, Feature.UNDERSCORES_IN_LITERALS);
             }
             saveCh = reader.ch;
             savePos = reader.bp;
@@ -506,7 +516,6 @@ public class JavaTokenizer {
                         skipIllegalUnderscores();
                         scanNumber(pos, 16);
                     } else if (reader.ch == 'b' || reader.ch == 'B') {
-                        checkSourceLevel(pos, Feature.BINARY_LITERALS);
                         reader.scanChar();
                         skipIllegalUnderscores();
                         scanNumber(pos, 2);
@@ -637,6 +646,59 @@ public class JavaTokenizer {
                         lexError(pos, Errors.UnclosedStrLit);
                     }
                     break loop;
+                case '`':
+                    checkSourceLevel(pos, Feature.RAW_STRING_LITERALS);
+                    // Ensure that the backtick was not a Unicode escape sequence
+                    if (reader.peekBack() != '`') {
+                        reader.scanChar();
+                        lexError(pos, Errors.UnicodeBacktick);
+                        break loop;
+                    }
+                    // Turn off unicode processsing and save previous state
+                    boolean oldState = reader.setUnicodeConversion(false);
+                    // Count the number of backticks in the open quote sequence
+                    int openCount = reader.skipRepeats();
+                    // Skip last backtick
+                    reader.scanChar();
+                    while (reader.bp < reader.buflen) {
+                        // If potential close quote sequence
+                        if (reader.ch == '`') {
+                            // Count number of backticks in sequence
+                            int closeCount = reader.skipRepeats();
+                            // If the counts match we can exit the raw string literal
+                            if (openCount == closeCount) {
+                                break;
+                            }
+                            // Emit non-close backtick sequence
+                            for (int i = 0; i <= closeCount; i++) {
+                                reader.putChar('`', false);
+                            }
+                            // Skip last backtick
+                            reader.scanChar();
+                        } else if (reader.ch == LF) {
+                            reader.putChar(true);
+                            processLineTerminator(pos, reader.bp);
+                        } else if (reader.ch == CR) {
+                            if (reader.peekChar() == LF) {
+                                reader.scanChar();
+                            }
+                            // Translate CR and CRLF sequences to LF
+                            reader.putChar('\n', true);
+                            processLineTerminator(pos, reader.bp);
+                        } else {
+                            reader.putChar(true);
+                        }
+                    }
+                    // Restore unicode processsing
+                    reader.setUnicodeConversion(oldState);
+                    // Ensure the close quote was encountered
+                    if (reader.bp == reader.buflen) {
+                        lexError(pos, Errors.UnclosedStrLit);
+                    } else {
+                        tk = TokenKind.STRINGLITERAL;
+                        reader.scanChar();
+                    }
+                    break loop;
                 default:
                     if (isSpecial(reader.ch)) {
                         scanOperator();
@@ -662,7 +724,7 @@ public class JavaTokenizer {
                             scanNumber(pos, 10);
                         } else if (reader.bp == reader.buflen || reader.ch == EOI && reader.bp + 1 == reader.buflen) { // JLS 3.5
                             tk = TokenKind.EOF;
-                            pos = reader.buflen;
+                            pos = reader.realLength;
                         } else {
                             String arg;
 

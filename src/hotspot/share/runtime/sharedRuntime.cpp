@@ -25,6 +25,7 @@
 #include "precompiled.hpp"
 #include "jvm.h"
 #include "aot/aotLoader.hpp"
+#include "code/compiledMethod.inline.hpp"
 #include "classfile/stringTable.hpp"
 #include "classfile/systemDictionary.hpp"
 #include "classfile/vmSymbols.hpp"
@@ -35,14 +36,17 @@
 #include "compiler/abstractCompiler.hpp"
 #include "compiler/compileBroker.hpp"
 #include "compiler/disassembler.hpp"
+#include "gc/shared/barrierSet.hpp"
 #include "gc/shared/gcLocker.inline.hpp"
 #include "interpreter/interpreter.hpp"
 #include "interpreter/interpreterRuntime.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "logging/log.hpp"
 #include "memory/metaspaceShared.hpp"
 #include "memory/resourceArea.hpp"
-#include "memory/universe.inline.hpp"
+#include "memory/universe.hpp"
 #include "oops/klass.hpp"
+#include "oops/method.inline.hpp"
 #include "oops/objArrayKlass.hpp"
 #include "oops/oop.inline.hpp"
 #include "prims/forte.hpp"
@@ -53,16 +57,16 @@
 #include "runtime/atomic.hpp"
 #include "runtime/biasedLocking.hpp"
 #include "runtime/compilationPolicy.hpp"
+#include "runtime/frame.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/init.hpp"
-#include "runtime/interfaceSupport.hpp"
+#include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/java.hpp"
 #include "runtime/javaCalls.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/stubRoutines.hpp"
-#include "runtime/vframe.hpp"
+#include "runtime/vframe.inline.hpp"
 #include "runtime/vframeArray.hpp"
-#include "trace/tracing.hpp"
 #include "utilities/copy.hpp"
 #include "utilities/dtrace.hpp"
 #include "utilities/events.hpp"
@@ -200,26 +204,6 @@ void SharedRuntime::print_ic_miss_histogram() {
   }
 }
 #endif // PRODUCT
-
-#if INCLUDE_ALL_GCS
-
-// G1 write-barrier pre: executed before a pointer store.
-JRT_LEAF(void, SharedRuntime::g1_wb_pre(oopDesc* orig, JavaThread *thread))
-  if (orig == NULL) {
-    assert(false, "should be optimized out");
-    return;
-  }
-  assert(oopDesc::is_oop(orig, true /* ignore mark word */), "Error");
-  // store the original value that was in the field reference
-  thread->satb_mark_queue().enqueue(orig);
-JRT_END
-
-// G1 write-barrier post: executed after a pointer store.
-JRT_LEAF(void, SharedRuntime::g1_wb_post(void* card_addr, JavaThread* thread))
-  thread->dirty_card_queue().enqueue(card_addr);
-JRT_END
-
-#endif // INCLUDE_ALL_GCS
 
 
 JRT_LEAF(jlong, SharedRuntime::lmul(jlong y, jlong x))
@@ -838,9 +822,15 @@ address SharedRuntime::continuation_for_implicit_exception(JavaThread* thread,
           if (vt_stub->is_abstract_method_error(pc)) {
             assert(!vt_stub->is_vtable_stub(), "should never see AbstractMethodErrors from vtable-type VtableStubs");
             Events::log_exception(thread, "AbstractMethodError at " INTPTR_FORMAT, p2i(pc));
-            return StubRoutines::throw_AbstractMethodError_entry();
+            // Instead of throwing the abstract method error here directly, we re-resolve
+            // and will throw the AbstractMethodError during resolve. As a result, we'll
+            // get a more detailed error message.
+            return SharedRuntime::get_handle_wrong_method_stub();
           } else {
             Events::log_exception(thread, "NullPointerException at vtable entry " INTPTR_FORMAT, p2i(pc));
+            // Assert that the signal comes from the expected location in stub code.
+            assert(vt_stub->is_null_pointer_exception(pc),
+                   "obtained signal from unexpected location in stub code");
             return StubRoutines::throw_NullPointerException_at_call_entry();
           }
         } else {
@@ -1092,6 +1082,7 @@ Handle SharedRuntime::find_callee_info_helper(JavaThread* thread,
 
   Bytecode_invoke bytecode(caller, bci);
   int bytecode_index = bytecode.index();
+  bc = bytecode.invoke_code();
 
   methodHandle attached_method = extract_attached_method(vfst);
   if (attached_method.not_null()) {
@@ -1105,6 +1096,11 @@ Handle SharedRuntime::find_callee_info_helper(JavaThread* thread,
 
       // Adjust invocation mode according to the attached method.
       switch (bc) {
+        case Bytecodes::_invokevirtual:
+          if (attached_method->method_holder()->is_interface()) {
+            bc = Bytecodes::_invokeinterface;
+          }
+          break;
         case Bytecodes::_invokeinterface:
           if (!attached_method->method_holder()->is_interface()) {
             bc = Bytecodes::_invokevirtual;
@@ -1120,9 +1116,9 @@ Handle SharedRuntime::find_callee_info_helper(JavaThread* thread,
           break;
       }
     }
-  } else {
-    bc = bytecode.invoke_code();
   }
+
+  assert(bc != Bytecodes::_illegal, "not initialized");
 
   bool has_receiver = bc != Bytecodes::_invokestatic &&
                       bc != Bytecodes::_invokedynamic &&
@@ -1453,7 +1449,33 @@ JRT_END
 
 // Handle abstract method call
 JRT_BLOCK_ENTRY(address, SharedRuntime::handle_wrong_method_abstract(JavaThread* thread))
-  return StubRoutines::throw_AbstractMethodError_entry();
+  // Verbose error message for AbstractMethodError.
+  // Get the called method from the invoke bytecode.
+  vframeStream vfst(thread, true);
+  assert(!vfst.at_end(), "Java frame must exist");
+  methodHandle caller(vfst.method());
+  Bytecode_invoke invoke(caller, vfst.bci());
+  DEBUG_ONLY( invoke.verify(); )
+
+  // Find the compiled caller frame.
+  RegisterMap reg_map(thread);
+  frame stubFrame = thread->last_frame();
+  assert(stubFrame.is_runtime_frame(), "must be");
+  frame callerFrame = stubFrame.sender(&reg_map);
+  assert(callerFrame.is_compiled_frame(), "must be");
+
+  // Install exception and return forward entry.
+  address res = StubRoutines::throw_AbstractMethodError_entry();
+  JRT_BLOCK
+    methodHandle callee = invoke.static_target(thread);
+    if (!callee.is_null()) {
+      oop recv = callerFrame.retrieve_receiver(&reg_map);
+      Klass *recv_klass = (recv != NULL) ? recv->klass() : NULL;
+      LinkResolver::throw_abstract_method_error(callee, recv_klass, thread);
+      res = StubRoutines::forward_exception_entry();
+    }
+  JRT_BLOCK_END
+  return res;
 JRT_END
 
 
@@ -1937,14 +1959,27 @@ char* SharedRuntime::generate_class_cast_message(
 // must use a ResourceMark in order to correctly free the result.
 char* SharedRuntime::generate_class_cast_message(
     Klass* caster_klass, Klass* target_klass, Symbol* target_klass_name) {
-
-  const char* caster_name = caster_klass->class_loader_and_module_name();
+  const char* caster_name = caster_klass->external_name();
 
   assert(target_klass != NULL || target_klass_name != NULL, "one must be provided");
   const char* target_name = target_klass == NULL ? target_klass_name->as_C_string() :
-                                                   target_klass->class_loader_and_module_name();
+                                                   target_klass->external_name();
 
-  size_t msglen = strlen(caster_name) + strlen(" cannot be cast to ") + strlen(target_name) + 1;
+  size_t msglen = strlen(caster_name) + strlen("class ") + strlen(" cannot be cast to class ") + strlen(target_name) + 1;
+
+  const char* caster_klass_description = "";
+  const char* target_klass_description = "";
+  const char* klass_separator = "";
+  if (target_klass != NULL && caster_klass->module() == target_klass->module()) {
+    caster_klass_description = caster_klass->joint_in_module_of_loader(target_klass);
+  } else {
+    caster_klass_description = caster_klass->class_in_module_of_loader();
+    target_klass_description = (target_klass != NULL) ? target_klass->class_in_module_of_loader() : "";
+    klass_separator = (target_klass != NULL) ? "; " : "";
+  }
+
+  // add 3 for parenthesis and preceeding space
+  msglen += strlen(caster_klass_description) + strlen(target_klass_description) + strlen(klass_separator) + 3;
 
   char* message = NEW_RESOURCE_ARRAY_RETURN_NULL(char, msglen);
   if (message == NULL) {
@@ -1953,9 +1988,13 @@ char* SharedRuntime::generate_class_cast_message(
   } else {
     jio_snprintf(message,
                  msglen,
-                 "%s cannot be cast to %s",
+                 "class %s cannot be cast to class %s (%s%s%s)",
                  caster_name,
-                 target_name);
+                 target_name,
+                 caster_klass_description,
+                 klass_separator,
+                 target_klass_description
+                 );
   }
   return message;
 }
@@ -1967,11 +2006,7 @@ JRT_END
 
 // Handles the uncommon case in locking, i.e., contention or an inflated lock.
 JRT_BLOCK_ENTRY(void, SharedRuntime::complete_monitor_locking_C(oopDesc* _obj, BasicLock* lock, JavaThread* thread))
-  // Disable ObjectSynchronizer::quick_enter() in default config
-  // on AARCH64 and ARM until JDK-8153107 is resolved.
-  if (ARM_ONLY((SyncFlags & 256) != 0 &&)
-      AARCH64_ONLY((SyncFlags & 256) != 0 &&)
-      !SafepointSynchronize::is_synchronizing()) {
+  if (!SafepointSynchronize::is_synchronizing()) {
     // Only try quick_enter() if we're not trying to reach a safepoint
     // so that the calling thread reaches the safepoint more quickly.
     if (ObjectSynchronizer::quick_enter(_obj, thread, lock)) return;
@@ -2100,17 +2135,19 @@ class MethodArityHistogram {
   static int _max_size;                       // max. arg size seen
 
   static void add_method_to_histogram(nmethod* nm) {
-    Method* m = nm->method();
-    ArgumentCount args(m->signature());
-    int arity   = args.size() + (m->is_static() ? 0 : 1);
-    int argsize = m->size_of_parameters();
-    arity   = MIN2(arity, MAX_ARITY-1);
-    argsize = MIN2(argsize, MAX_ARITY-1);
-    int count = nm->method()->compiled_invocation_count();
-    _arity_histogram[arity]  += count;
-    _size_histogram[argsize] += count;
-    _max_arity = MAX2(_max_arity, arity);
-    _max_size  = MAX2(_max_size, argsize);
+    if (CompiledMethod::nmethod_access_is_safe(nm)) {
+      Method* method = nm->method();
+      ArgumentCount args(method->signature());
+      int arity   = args.size() + (method->is_static() ? 0 : 1);
+      int argsize = method->size_of_parameters();
+      arity   = MIN2(arity, MAX_ARITY-1);
+      argsize = MIN2(argsize, MAX_ARITY-1);
+      int count = method->compiled_invocation_count();
+      _arity_histogram[arity]  += count;
+      _size_histogram[argsize] += count;
+      _max_arity = MAX2(_max_arity, arity);
+      _max_size  = MAX2(_max_size, argsize);
+    }
   }
 
   void print_histogram_helper(int n, int* histo, const char* name) {
@@ -2828,6 +2865,22 @@ JRT_ENTRY_NO_ASYNC(void, SharedRuntime::block_for_jni_critical(JavaThread* threa
   GCLocker::unlock_critical(thread);
 JRT_END
 
+JRT_LEAF(oopDesc*, SharedRuntime::pin_object(JavaThread* thread, oopDesc* obj))
+  assert(Universe::heap()->supports_object_pinning(), "Why we are here?");
+  assert(obj != NULL, "Should not be null");
+  oop o(obj);
+  o = Universe::heap()->pin_object(thread, o);
+  assert(o != NULL, "Should not be null");
+  return o;
+JRT_END
+
+JRT_LEAF(void, SharedRuntime::unpin_object(JavaThread* thread, oopDesc* obj))
+  assert(Universe::heap()->supports_object_pinning(), "Why we are here?");
+  assert(obj != NULL, "Should not be null");
+  oop o(obj);
+  Universe::heap()->unpin_object(thread, o);
+JRT_END
+
 // -------------------------------------------------------------------------
 // Java-Java calling convention
 // (what you use when Java calls Java)
@@ -3111,6 +3164,6 @@ void SharedRuntime::on_slowpath_allocation_exit(JavaThread* thread) {
   oop new_obj = thread->vm_result();
   if (new_obj == NULL) return;
 
-  BarrierSet *bs = Universe::heap()->barrier_set();
+  BarrierSet *bs = BarrierSet::barrier_set();
   bs->on_slowpath_allocation_exit(thread, new_obj);
 }

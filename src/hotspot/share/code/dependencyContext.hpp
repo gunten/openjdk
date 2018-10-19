@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -53,7 +53,7 @@ class nmethodBucket: public CHeapObj<mtClass> {
 
  public:
   nmethodBucket(nmethod* nmethod, nmethodBucket* next) :
-   _nmethod(nmethod), _next(next), _count(1) {}
+   _nmethod(nmethod), _count(1), _next(next) {}
 
   int count()                             { return _count; }
   int increment()                         { _count += 1; return _count; }
@@ -140,10 +140,6 @@ class DependencyContext : public StackObj {
   int  remove_all_dependents();
 
   void expunge_stale_entries();
-
-  // Unsafe deallocation of nmethodBuckets. Used in IK::release_C_heap_structures
-  // to clean up the context possibly containing live entries pointing to unloaded nmethods.
-  void wipe();
 
 #ifndef PRODUCT
   void print_dependent_nmethods(bool verbose);

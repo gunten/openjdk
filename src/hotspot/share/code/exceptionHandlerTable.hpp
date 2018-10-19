@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -83,7 +83,7 @@ class HandlerTableEntry {
 // modified.
 
 class nmethod;
-class ExceptionHandlerTable VALUE_OBJ_CLASS_SPEC {
+class ExceptionHandlerTable {
  private:
   HandlerTableEntry* _table;    // the table
   int                _length;   // the current length of the table
@@ -140,14 +140,14 @@ class ExceptionHandlerTable VALUE_OBJ_CLASS_SPEC {
 // Use 32-bit representation for offsets
 typedef  uint              implicit_null_entry;
 
-class ImplicitExceptionTable VALUE_OBJ_CLASS_SPEC {
+class ImplicitExceptionTable {
   uint _size;
   uint _len;
   implicit_null_entry *_data;
   implicit_null_entry *adr( uint idx ) const { return &_data[2*idx]; }
   ReallocMark          _nesting;  // assertion check for reallocations
 public:
-  ImplicitExceptionTable( ) :  _data(0), _size(0), _len(0) { }
+  ImplicitExceptionTable( ) :  _size(0), _len(0), _data(0) { }
   // (run-time) construction from nmethod
   ImplicitExceptionTable( const nmethod *nm );
 

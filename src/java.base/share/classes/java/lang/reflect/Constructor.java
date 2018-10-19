@@ -103,11 +103,8 @@ public final class Constructor<T> extends Executable {
     // occur in annotation code.
     private Constructor<T>      root;
 
-    /**
-     * Used by Excecutable for annotation sharing.
-     */
     @Override
-    Executable getRoot() {
+    Constructor<T> getRoot() {
         return root;
     }
 
@@ -251,6 +248,11 @@ public final class Constructor<T> extends Executable {
     @Override
     Class<?>[] getSharedParameterTypes() {
         return parameterTypes;
+    }
+
+    @Override
+    Class<?>[] getSharedExceptionTypes() {
+        return exceptionTypes;
     }
 
     /**
@@ -474,18 +476,27 @@ public final class Constructor<T> extends Executable {
         throws InstantiationException, IllegalAccessException,
                IllegalArgumentException, InvocationTargetException
     {
-        if (!override) {
-            Class<?> caller = Reflection.getCallerClass();
+        Class<?> caller = override ? null : Reflection.getCallerClass();
+        return newInstanceWithCaller(initargs, !override, caller);
+    }
+
+    /* package-private */
+    T newInstanceWithCaller(Object[] args, boolean checkAccess, Class<?> caller)
+        throws InstantiationException, IllegalAccessException,
+               InvocationTargetException
+    {
+        if (checkAccess)
             checkAccess(caller, clazz, clazz, modifiers);
-        }
+
         if ((clazz.getModifiers() & Modifier.ENUM) != 0)
             throw new IllegalArgumentException("Cannot reflectively create enum objects");
+
         ConstructorAccessor ca = constructorAccessor;   // read volatile
         if (ca == null) {
             ca = acquireConstructorAccessor();
         }
         @SuppressWarnings("unchecked")
-        T inst = (T) ca.newInstance(initargs);
+        T inst = (T) ca.newInstance(args);
         return inst;
     }
 

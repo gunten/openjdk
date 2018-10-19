@@ -40,10 +40,14 @@ import java.util.StringJoiner;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 import jdk.internal.HotSpotIntrinsicCandidate;
 import jdk.internal.vm.annotation.Stable;
+
+import static java.util.function.Predicate.not;
 
 /**
  * The {@code String} class represents character strings. All
@@ -2179,14 +2183,23 @@ public final class String
      *
      * <p> The {@code limit} parameter controls the number of times the
      * pattern is applied and therefore affects the length of the resulting
-     * array.  If the limit <i>n</i> is greater than zero then the pattern
-     * will be applied at most <i>n</i>&nbsp;-&nbsp;1 times, the array's
-     * length will be no greater than <i>n</i>, and the array's last entry
-     * will contain all input beyond the last matched delimiter.  If <i>n</i>
-     * is non-positive then the pattern will be applied as many times as
-     * possible and the array can have any length.  If <i>n</i> is zero then
-     * the pattern will be applied as many times as possible, the array can
-     * have any length, and trailing empty strings will be discarded.
+     * array.
+     * <ul>
+     *    <li><p>
+     *    If the <i>limit</i> is positive then the pattern will be applied
+     *    at most <i>limit</i>&nbsp;-&nbsp;1 times, the array's length will be
+     *    no greater than <i>limit</i>, and the array's last entry will contain
+     *    all input beyond the last matched delimiter.</p></li>
+     *
+     *    <li><p>
+     *    If the <i>limit</i> is zero then the pattern will be applied as
+     *    many times as possible, the array can have any length, and trailing
+     *    empty strings will be discarded.</p></li>
+     *
+     *    <li><p>
+     *    If the <i>limit</i> is negative then the pattern will be applied
+     *    as many times as possible and the array can have any length.</p></li>
+     * </ul>
      *
      * <p> The string {@code "boo:and:foo"}, for example, yields the
      * following results with these parameters:
@@ -2599,40 +2612,363 @@ public final class String
     }
 
     /**
-     * Returns a string whose value is this string, with any leading and trailing
-     * whitespace removed.
+     * Returns a string whose value is this string, with all leading
+     * and trailing space removed, where space is defined
+     * as any character whose codepoint is less than or equal to
+     * {@code 'U+0020'} (the space character).
      * <p>
      * If this {@code String} object represents an empty character
      * sequence, or the first and last characters of character sequence
      * represented by this {@code String} object both have codes
-     * greater than {@code '\u005Cu0020'} (the space character), then a
+     * that are not space (as defined above), then a
      * reference to this {@code String} object is returned.
      * <p>
-     * Otherwise, if there is no character with a code greater than
-     * {@code '\u005Cu0020'} in the string, then a
-     * {@code String} object representing an empty string is
-     * returned.
+     * Otherwise, if all characters in this string are space (as
+     * defined above), then a  {@code String} object representing an
+     * empty string is returned.
      * <p>
      * Otherwise, let <i>k</i> be the index of the first character in the
-     * string whose code is greater than {@code '\u005Cu0020'}, and let
+     * string whose code is not a space (as defined above) and let
      * <i>m</i> be the index of the last character in the string whose code
-     * is greater than {@code '\u005Cu0020'}. A {@code String}
+     * is not a space (as defined above). A {@code String}
      * object is returned, representing the substring of this string that
      * begins with the character at index <i>k</i> and ends with the
      * character at index <i>m</i>-that is, the result of
      * {@code this.substring(k, m + 1)}.
      * <p>
-     * This method may be used to trim whitespace (as defined above) from
+     * This method may be used to trim space (as defined above) from
      * the beginning and end of a string.
      *
-     * @return  A string whose value is this string, with any leading and trailing white
-     *          space removed, or this string if it has no leading or
-     *          trailing white space.
+     * @return  a string whose value is this string, with all leading
+     *          and trailing space removed, or this string if it
+     *          has no leading or trailing space.
      */
     public String trim() {
         String ret = isLatin1() ? StringLatin1.trim(value)
                                 : StringUTF16.trim(value);
         return ret == null ? this : ret;
+    }
+
+    /**
+     * Returns a string whose value is this string, with all leading
+     * and trailing {@link Character#isWhitespace(int) white space}
+     * removed.
+     * <p>
+     * If this {@code String} object represents an empty string,
+     * or if all code points in this string are
+     * {@link Character#isWhitespace(int) white space}, then an empty string
+     * is returned.
+     * <p>
+     * Otherwise, returns a substring of this string beginning with the first
+     * code point that is not a {@link Character#isWhitespace(int) white space}
+     * up to and including the last code point that is not a
+     * {@link Character#isWhitespace(int) white space}.
+     * <p>
+     * This method may be used to strip
+     * {@link Character#isWhitespace(int) white space} from
+     * the beginning and end of a string.
+     *
+     * @return  a string whose value is this string, with all leading
+     *          and trailing white space removed
+     *
+     * @see Character#isWhitespace(int)
+     *
+     * @since 11
+     */
+    public String strip() {
+        String ret = isLatin1() ? StringLatin1.strip(value)
+                                : StringUTF16.strip(value);
+        return ret == null ? this : ret;
+    }
+
+    /**
+     * Returns a string whose value is this string, with all leading
+     * {@link Character#isWhitespace(int) white space} removed.
+     * <p>
+     * If this {@code String} object represents an empty string,
+     * or if all code points in this string are
+     * {@link Character#isWhitespace(int) white space}, then an empty string
+     * is returned.
+     * <p>
+     * Otherwise, returns a substring of this string beginning with the first
+     * code point that is not a {@link Character#isWhitespace(int) white space}
+     * up to to and including the last code point of this string.
+     * <p>
+     * This method may be used to trim
+     * {@link Character#isWhitespace(int) white space} from
+     * the beginning of a string.
+     *
+     * @return  a string whose value is this string, with all leading white
+     *          space removed
+     *
+     * @see Character#isWhitespace(int)
+     *
+     * @since 11
+     */
+    public String stripLeading() {
+        String ret = isLatin1() ? StringLatin1.stripLeading(value)
+                                : StringUTF16.stripLeading(value);
+        return ret == null ? this : ret;
+    }
+
+    /**
+     * Returns a string whose value is this string, with all trailing
+     * {@link Character#isWhitespace(int) white space} removed.
+     * <p>
+     * If this {@code String} object represents an empty string,
+     * or if all characters in this string are
+     * {@link Character#isWhitespace(int) white space}, then an empty string
+     * is returned.
+     * <p>
+     * Otherwise, returns a substring of this string beginning with the first
+     * code point of this string up to and including the last code point
+     * that is not a {@link Character#isWhitespace(int) white space}.
+     * <p>
+     * This method may be used to trim
+     * {@link Character#isWhitespace(int) white space} from
+     * the end of a string.
+     *
+     * @return  a string whose value is this string, with all trailing white
+     *          space removed
+     *
+     * @see Character#isWhitespace(int)
+     *
+     * @since 11
+     */
+    public String stripTrailing() {
+        String ret = isLatin1() ? StringLatin1.stripTrailing(value)
+                                : StringUTF16.stripTrailing(value);
+        return ret == null ? this : ret;
+    }
+
+    /**
+     * Returns {@code true} if the string is empty or contains only
+     * {@link Character#isWhitespace(int) white space} codepoints,
+     * otherwise {@code false}.
+     *
+     * @return {@code true} if the string is empty or contains only
+     *         {@link Character#isWhitespace(int) white space} codepoints,
+     *         otherwise {@code false}
+     *
+     * @see Character#isWhitespace(int)
+     *
+     * @since 11
+     */
+    public boolean isBlank() {
+        return indexOfNonWhitespace() == length();
+    }
+
+    private Stream<String> lines(int maxLeading, int maxTrailing) {
+        return isLatin1() ? StringLatin1.lines(value, maxLeading, maxTrailing)
+                          : StringUTF16.lines(value, maxLeading, maxTrailing);
+    }
+
+    /**
+     * Returns a stream of lines extracted from this string,
+     * separated by line terminators.
+     * <p>
+     * A <i>line terminator</i> is one of the following:
+     * a line feed character {@code "\n"} (U+000A),
+     * a carriage return character {@code "\r"} (U+000D),
+     * or a carriage return followed immediately by a line feed
+     * {@code "\r\n"} (U+000D U+000A).
+     * <p>
+     * A <i>line</i> is either a sequence of zero or more characters
+     * followed by a line terminator, or it is a sequence of one or
+     * more characters followed by the end of the string. A
+     * line does not include the line terminator.
+     * <p>
+     * The stream returned by this method contains the lines from
+     * this string in the order in which they occur.
+     *
+     * @apiNote This definition of <i>line</i> implies that an empty
+     *          string has zero lines and that there is no empty line
+     *          following a line terminator at the end of a string.
+     *
+     * @implNote This method provides better performance than
+     *           split("\R") by supplying elements lazily and
+     *           by faster search of new line terminators.
+     *
+     * @return  the stream of lines extracted from this string
+     *
+     * @since 11
+     */
+    public Stream<String> lines() {
+        return lines(0, 0);
+    }
+
+    /**
+     * Adjusts the indentation of each line of this string based on the value of
+     * {@code n}, and normalizes line termination characters.
+     * <p>
+     * This string is conceptually separated into lines using
+     * {@link String#lines()}. Each line is then adjusted as described below
+     * and then suffixed with a line feed {@code "\n"} (U+000A). The resulting
+     * lines are then concatenated and returned.
+     * <p>
+     * If {@code n > 0} then {@code n} spaces (U+0020) are inserted at the
+     * beginning of each line. {@link String#isBlank() Blank lines} are
+     * unaffected.
+     * <p>
+     * If {@code n < 0} then up to {@code n}
+     * {@link Character#isWhitespace(int) white space characters} are removed
+     * from the beginning of each line. If a given line does not contain
+     * sufficient white space then all leading
+     * {@link Character#isWhitespace(int) white space characters} are removed.
+     * Each white space character is treated as a single character. In
+     * particular, the tab character {@code "\t"} (U+0009) is considered a
+     * single character; it is not expanded.
+     * <p>
+     * If {@code n == 0} then the line remains unchanged. However, line
+     * terminators are still normalized.
+     * <p>
+     *
+     * @param n  number of leading
+     *           {@link Character#isWhitespace(int) white space characters}
+     *           to add or remove
+     *
+     * @return string with indentation adjusted and line endings normalized
+     *
+     * @see String#lines()
+     * @see String#isBlank()
+     * @see Character#isWhitespace(int)
+     *
+     * @since 12
+     */
+    public String indent(int n) {
+        return isEmpty() ? "" :  indent(n, false);
+    }
+
+    private String indent(int n, boolean removeBlanks) {
+        Stream<String> stream = removeBlanks ? lines(Integer.MAX_VALUE, Integer.MAX_VALUE)
+                                             : lines();
+        if (n > 0) {
+            final String spaces = " ".repeat(n);
+            stream = stream.map(s -> s.isBlank() ? s : spaces + s);
+        } else if (n == Integer.MIN_VALUE) {
+            stream = stream.map(s -> s.stripLeading());
+        } else if (n < 0) {
+            stream = stream.map(s -> s.substring(Math.min(-n, s.indexOfNonWhitespace())));
+        }
+        return stream.collect(Collectors.joining("\n", "", "\n"));
+    }
+
+    private int indexOfNonWhitespace() {
+        return isLatin1() ? StringLatin1.indexOfNonWhitespace(value)
+                          : StringUTF16.indexOfNonWhitespace(value);
+    }
+
+    private int lastIndexOfNonWhitespace() {
+        return isLatin1() ? StringLatin1.lastIndexOfNonWhitespace(value)
+                          : StringUTF16.lastIndexOfNonWhitespace(value);
+    }
+
+    /**
+     * Removes vertical and horizontal white space margins from around the
+     * essential body of a multi-line string, while preserving relative
+     * indentation.
+     * <p>
+     * This string is first conceptually separated into lines as if by
+     * {@link String#lines()}.
+     * <p>
+     * Then, the <i>minimum indentation</i> (min) is determined as follows. For
+     * each non-blank line (as defined by {@link String#isBlank()}), the
+     * leading {@link Character#isWhitespace(int) white space} characters are
+     * counted. The <i>min</i> value is the smallest of these counts.
+     * <p>
+     * For each non-blank line, <i>min</i> leading white space characters are
+     * removed. Each white space character is treated as a single character. In
+     * particular, the tab character {@code "\t"} (U+0009) is considered a
+     * single character; it is not expanded.
+     * <p>
+     * Leading and trailing blank lines, if any, are removed. Trailing spaces are
+     * preserved.
+     * <p>
+     * Each line is suffixed with a line feed character {@code "\n"} (U+000A).
+     * <p>
+     * Finally, the lines are concatenated into a single string and returned.
+     *
+     * @apiNote
+     * This method's primary purpose is to shift a block of lines as far as
+     * possible to the left, while preserving relative indentation. Lines
+     * that were indented the least will thus have no leading white space.
+     *
+     * Example:
+     * <blockquote><pre>
+     * `
+     *      This is the first line
+     *          This is the second line
+     * `.align();
+     *
+     * returns
+     * This is the first line
+     *     This is the second line
+     * </pre></blockquote>
+     *
+     * @return string with margins removed and line terminators normalized
+     *
+     * @see String#lines()
+     * @see String#isBlank()
+     * @see String#indent(int)
+     * @see Character#isWhitespace(int)
+     *
+     * @since 12
+     */
+    public String align() {
+        return align(0);
+    }
+
+    /**
+     * Removes vertical and horizontal white space margins from around the
+     * essential body of a multi-line string, while preserving relative
+     * indentation and with optional indentation adjustment.
+     * <p>
+     * Invoking this method is equivalent to:
+     * <blockquote>
+     *  {@code this.align().indent(n)}
+     * </blockquote>
+     *
+     * @apiNote
+     * Examples:
+     * <blockquote><pre>
+     * `
+     *      This is the first line
+     *          This is the second line
+     * `.align(0);
+     *
+     * returns
+     * This is the first line
+     *     This is the second line
+     *
+     *
+     * `
+     *    This is the first line
+     *       This is the second line
+     * `.align(4);
+     * returns
+     *     This is the first line
+     *         This is the second line
+     * </pre></blockquote>
+     *
+     * @param n  number of leading white space characters
+     *           to add or remove
+     *
+     * @return string with margins removed, indentation adjusted and
+     *         line terminators normalized
+     *
+     * @see String#align()
+     *
+     * @since 12
+     */
+    public String align(int n) {
+        if (isEmpty()) {
+            return "";
+        }
+        int outdent = lines().filter(not(String::isBlank))
+                             .mapToInt(String::indexOfNonWhitespace)
+                             .min()
+                             .orElse(0);
+        return indent(n - outdent, true);
     }
 
     /**
@@ -2647,7 +2983,7 @@ public final class String
     /**
      * Returns a stream of {@code int} zero-extending the {@code char} values
      * from this sequence.  Any char which maps to a <a
-     * href="{@docRoot}/java/lang/Character.html#unicode">surrogate code
+     * href="{@docRoot}/java.base/java/lang/Character.html#unicode">surrogate code
      * point</a> is passed through uninterpreted.
      *
      * @return an IntStream of char values from this sequence
@@ -3178,6 +3514,7 @@ public final class String
             return new String(StringUTF16.toBytesSupplementary(codePoint), UTF16);
         }
 
-        throw new IllegalArgumentException("Not a valid Unicode code point");
+        throw new IllegalArgumentException(
+            format("Not a valid Unicode code point: 0x%X", codePoint));
     }
 }

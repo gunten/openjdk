@@ -103,6 +103,7 @@ public class WhiteBox {
     return isClassAlive0(name.replace('.', '/'));
   }
   private native boolean isClassAlive0(String name);
+  public  native int getSymbolRefcount(String name);
 
   private native boolean isMonitorInflated0(Object obj);
   public         boolean isMonitorInflated(Object obj) {
@@ -382,9 +383,9 @@ public class WhiteBox {
 
   // Don't use these methods directly
   // Use sun.hotspot.gc.GC class instead.
-  public native int currentGC();
-  public native int allSupportedGC();
-  public native boolean gcSelectedByErgo();
+  public native boolean isGCSupported(int name);
+  public native boolean isGCSelected(int name);
+  public native boolean isGCSelectedErgonomically();
 
   // Force Young GC
   public native void youngGC();
@@ -438,16 +439,6 @@ public class WhiteBox {
 
   // CPU features
   public native String getCPUFeatures();
-
-  // Native extensions
-  public native long getHeapUsageForContext(int context);
-  public native long getHeapRegionCountForContext(int context);
-  private native int getContextForObject0(Object obj);
-  public         int getContextForObject(Object obj) {
-    Objects.requireNonNull(obj);
-    return getContextForObject0(obj);
-  }
-  public native void printRegionInfo(int context);
 
   // VM flags
   public native boolean isConstantVMFlag(String name);
@@ -521,10 +512,13 @@ public class WhiteBox {
   public native void assertMatchingSafepointCalls(boolean mutexSafepointValue, boolean attemptedNoSafepointValue);
 
   // Sharing & archiving
+  public native String  getDefaultArchivePath();
+  public native boolean isSharingEnabled();
   public native boolean isShared(Object o);
   public native boolean isSharedClass(Class<?> c);
   public native boolean areSharedStringsIgnored();
   public native boolean isCDSIncludedInVmBuild();
+  public native boolean isJFRIncludedInVmBuild();
   public native boolean isJavaHeapArchiveSupported();
   public native Object  getResolvedReferences(Class<?> c);
   public native boolean areOpenArchiveHeapObjectsMapped();
@@ -545,4 +539,10 @@ public class WhiteBox {
 
   // Decoder
   public native void disableElfSectionCache();
+
+  // Resolved Method Table
+  public native int resolvedMethodRemovedCount();
+
+  // Protection Domain Table
+  public native int protectionDomainRemovedCount();
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2008, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -90,7 +90,6 @@ void C1_MacroAssembler::try_allocate(Register obj, Register obj_end, Register tm
     tlab_allocate(obj, obj_end, tmp1, size_expression, slow_case);
   } else {
     eden_allocate(obj, obj_end, tmp1, tmp2, size_expression, slow_case);
-    incr_allocated_bytes(size_expression, tmp1);
   }
 }
 
@@ -370,7 +369,6 @@ void C1_MacroAssembler::unlock_object(Register hdr, Register obj,
   }
 
   assert(oopDesc::mark_offset_in_bytes() == 0, "Required by atomic instructions");
-  Label retry;
 
   // Load displaced header and object from the lock
   ldr(hdr, Address(disp_hdr, mark_offset));

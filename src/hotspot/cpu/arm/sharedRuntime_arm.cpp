@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2008, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -513,6 +513,7 @@ int SharedRuntime::c_calling_convention(const BasicType *sig_bt,
     case T_ARRAY:
     case T_OBJECT:
     case T_ADDRESS:
+    case T_METADATA:
 #ifndef __ABI_HARD__
     case T_FLOAT:
 #endif // !__ABI_HARD__
@@ -1565,12 +1566,14 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   const Register disp_hdr    = AARCH64_ONLY(R22) NOT_AARCH64(altFP_7_11);
   const Register tmp         = AARCH64_ONLY(R23) NOT_AARCH64(R8);
 
-  Label slow_lock, slow_lock_biased, lock_done, fast_lock, leave;
+  Label slow_lock, slow_lock_biased, lock_done, fast_lock;
   if (method->is_synchronized()) {
     // The first argument is a handle to sync object (a class or an instance)
     __ ldr(sync_obj, Address(R1));
     // Remember the handle for the unlocking code
     __ mov(sync_handle, R1);
+
+    __ resolve(IS_NOT_NULL, sync_obj);
 
     if(UseBiasedLocking) {
       __ biased_locking_enter(sync_obj, tmp, disp_hdr/*scratched*/, false, Rtemp, lock_done, slow_lock_biased);
@@ -1685,9 +1688,11 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   __ b(reguard, eq);
   __ bind(reguard_done);
 
-  Label slow_unlock, unlock_done, retry;
+  Label slow_unlock, unlock_done;
   if (method->is_synchronized()) {
     __ ldr(sync_obj, Address(sync_handle));
+
+    __ resolve(IS_NOT_NULL, sync_obj);
 
     if(UseBiasedLocking) {
       __ biased_locking_exit(sync_obj, Rtemp, unlock_done);
